@@ -1,0 +1,4 @@
+httpx>=0.27
+customtkinter>=5.2
+# Only needed for the optional command-line interface (llmscanner-cli):
+rich>=13.0

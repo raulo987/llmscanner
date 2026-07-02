@@ -1,0 +1,28 @@
+[project]
+name = "llmscanner"
+version = "0.1.0"
+description = "Discover and benchmark local LLM servers (vLLM, SGLang, Ollama, llama.cpp, TGI, LM Studio) with a Mac-friendly GUI."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "httpx>=0.27",
+    "customtkinter>=5.2",
+]
+
+[project.optional-dependencies]
+cli = ["rich>=13.0"]
+
+[project.scripts]
+llmscanner = "llmscanner.gui:main"
+llmscanner-cli = "llmscanner.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["llmscanner"]
+
+[tool.setuptools.package-data]
+llmscanner = ["assets/*.png"]

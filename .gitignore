@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local app data (SQLite results DB lives in ~/.llmscanner by default)
+.llmscanner/
+*.db
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
