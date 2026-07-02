@@ -241,7 +241,8 @@ Nupp **"Copy to clipboard"** paneb sama tabeli (koos päistega) lõikelauale **t
 kleebib otse tabelarvutusse (Excel/Sheets) veergudesse.
 
 Iga mõõdetud punkt ilmub reaalajas tabelisse (roheline = feasible, punane = kukkus, tipp/knee esile
-tõstetud) ja live-logisse; lõpus kuvatakse **soovituslause** ja tok/s-vs-paralleelsus graafik.
+tõstetud) ja live-logisse; lõpus kuvatakse **soovituslause** ja tok/s-vs-paralleelsus graafik. Jooksva
+testi saab igal ajal **Cancel**-nupuga katkestada (juba mõõdetud read jäävad tabelisse alles).
 
 **Feasible = "kuni (1 − min success %) päringutest tohib ebaõnnestuda"** (vaikimisi 90%). Kui tase
 kukub, lõpetatakse sellel teljel kõrgemale ronimine. Kestust piiravad varajane peatamine ja päringu

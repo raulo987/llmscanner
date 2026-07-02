@@ -10,6 +10,7 @@ active light/dark appearance.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import csv
 import json
 import queue
@@ -413,6 +414,8 @@ class App:
         self.ui_queue: "queue.Queue" = queue.Queue()
         self._busy = False
         self._scan_holder = {"done": 0, "total": 1, "phase": "scan"}
+        self._current_fut = None
+        self._cancel_btns = []
         self._last_run = None
         self._run_cfgs = {}
         self._run_order = []
@@ -769,6 +772,11 @@ class App:
         runbar.pack(fill="x", padx=12, pady=4)
         self.btn_opt = ctk.CTkButton(runbar, text="Find optima", command=self.on_run_optima)
         self.btn_opt.pack(side="left")
+        btn_opt_cancel = ctk.CTkButton(runbar, text="Cancel", width=80, state="disabled",
+                                       fg_color="#b04a4a", hover_color="#963c3c",
+                                       command=self.cancel_current)
+        btn_opt_cancel.pack(side="left", padx=8)
+        self._cancel_btns.append(btn_opt_cancel)
         ctk.CTkButton(runbar, text="Export CSV…", width=100,
                       command=self.export_optima).pack(side="left", padx=8)
         ctk.CTkButton(runbar, text="Copy to clipboard", width=130,
@@ -1383,10 +1391,25 @@ class App:
             try:
                 res = fut.result()
                 self.post(lambda: self._finish(lambda: on_done(res)))
+            except (concurrent.futures.CancelledError, asyncio.CancelledError):
+                self.post(lambda: self._finish(self._on_cancelled))
             except Exception as e:
                 self.post(lambda err=e: self._finish(lambda: self._error(err)))
 
-        self.runner.submit(coro, done_cb)
+        self._current_fut = self.runner.submit(coro, done_cb)
+
+    def cancel_current(self):
+        """Abort the running background task (optimum finder / benchmark / scan)."""
+        fut = getattr(self, "_current_fut", None)
+        if self._busy and fut is not None:
+            self._set_status("Cancelling…")
+            fut.cancel()
+
+    def _on_cancelled(self):
+        self._set_status("Cancelled.")
+        for log in (getattr(self, "bench_log", None), getattr(self, "opt_log", None)):
+            if log is not None:
+                log.write("✗ Cancelled by user", "err")
 
     def _finish(self, fn):
         self._set_busy(False)
@@ -1398,6 +1421,9 @@ class App:
         state = "disabled" if busy else "normal"
         for b in (self.btn_detect, self.btn_models, self.btn_run, self.btn_scan, self.btn_opt):
             b.configure(state=state)
+        # Cancel buttons are the inverse: only usable while a task is running.
+        for b in self._cancel_btns:
+            b.configure(state="normal" if busy else "disabled")
         self.btn_repeat.configure(
             state="normal" if (not busy and self._last_run) else "disabled")
         if busy:
