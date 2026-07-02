@@ -257,7 +257,7 @@ järgmist concurrency't / suurust / profiili testitakse. Ilma selleta **valgub �
 järgmisesse** (nt petlikud "at capacity" 429-d, mis on tegelikult vaid virna laotud päringud). Tõsta
 jagatud/rate-limititud gateway jaoks; pane 0 pühendatud kohaliku serveri korral.
 
-Seadistatav: **paralleelsustasemed** (vaikimisi `1,2,4,8,16,24,32,48,64,128`), päringusuuruste loend
+Seadistatav: **paralleelsustasemed** (vaikimisi `1,2,4,8,16,24,32,48,64`), päringusuuruste loend
 (vaikimisi 1024–65536), genereerimispikkuste loend, workload-profiilid, concurrency-faasi kontekst,
 gen-tokenid päringu kohta, päringuid töölise kohta, konteksti lagi, min success %, **settle-paus**, ja
 kas teha päringusuuruste / genereerimispikkuse / profiili sweep.

@@ -111,7 +111,9 @@ INFO = {
     "opt_levels": (
         "Parallel-request counts to sweep in phase B, comma-separated. The finder "
         "climbs these — early-stopping when throughput plateaus or a level starts "
-        "failing — to find the best concurrency. Higher = more simultaneous requests."),
+        "failing — to find the best concurrency. Higher = more simultaneous requests.\n\n"
+        "Cap this at your server's max concurrency (e.g. vLLM --max-num-seqs): higher "
+        "levels just return 'at capacity' 429s and waste time. Default ends at 64."),
     "opt_ctxcap": (
         "Upper bound (tokens) for the phase-A max-context probe; prompts larger than "
         "this are never tried. Default 262144 (256k). Lower it to make the search "
@@ -128,7 +130,8 @@ INFO = {
         "To test several output lengths, use 'Sweep generation lengths' below."),
     "opt_rpw": (
         "Requests fired per parallel slot at each concurrency level. E.g. concurrency 8 "
-        "× 4 per worker = 32 requests. More = steadier numbers but a slower run."),
+        "× 2 per worker = 16 requests. More = steadier numbers but a slower run and more "
+        "total load on the server (at concurrency 64 × 2 that is already 128 requests)."),
     "opt_minok": (
         "A level counts as 'feasible' only if at least this % of its requests succeed; "
         "below it the finder stops climbing that axis. Lower (e.g. 75) tolerates flaky "
@@ -719,11 +722,11 @@ class App:
 
     # --------------------------------------------------------- Optimum finder
     def _build_opt_tab(self):
-        self.var_opt_levels = tk.StringVar(value="1,2,4,8,16,24,32,48,64,128")
+        self.var_opt_levels = tk.StringVar(value="1,2,4,8,16,24,32,48,64")
         self.var_opt_sizes = tk.StringVar(value="1024,2048,4096,8192,16384,32768,49152,65536")
         self.var_opt_basectx = tk.StringVar(value="1024")
         self.var_opt_gentok = tk.StringVar(value="64")
-        self.var_opt_rpw = tk.StringVar(value="4")
+        self.var_opt_rpw = tk.StringVar(value="2")
         self.var_opt_ctxcap = tk.StringVar(value="262144")
         self.var_opt_minok = tk.StringVar(value="90")
         self.var_opt_frontier = tk.BooleanVar(value=True)
@@ -843,7 +846,7 @@ class App:
         try:
             target = resolve_target(self.var_host.get(), self.var_port.get())
             levels = self._parse_levels(self.var_opt_levels.get(),
-                                        [1, 2, 4, 8, 16, 24, 32, 48, 64, 128])
+                                        [1, 2, 4, 8, 16, 24, 32, 48, 64])
             sizes = self._parse_levels(self.var_opt_sizes.get(),
                                        [1024, 2048, 4096, 8192, 16384, 32768, 49152, 65536])
             gen_sizes = self._parse_levels(self.var_opt_gensizes.get(), [64, 256, 1024])
