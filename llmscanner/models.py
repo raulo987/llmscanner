@@ -39,3 +39,4 @@ class RequestResult:
     output_tps: float = 0.0         # decode throughput, tokens/sec
     error: str = ""
     text: str = ""
+    est_tokens: bool = False        # token counts estimated (server sent no usage)

@@ -213,8 +213,11 @@ Total'i lihtsalt prefill-läbilaskevõimeks — read poleks võrreldavad. (Kui s
 langetatakse need automaatselt tagasi.) NB: kuna Total sisaldab sisend-tokeneid, kasvab see loomulikult
 konteksti suurusega — eri kontekstisuuruste võrdlemiseks vaata **Out tok/s** või võrdle sama suuruse sees.
 
-> Tokenite arvud tulevad serveri `usage`-väljast (vLLM/SGLang täpne), muidu hinnatakse (~4 tähemärki
-> tokeni kohta). Lisaks arvutatakse per-päring **decode-kiirus** (väljund / (lõpp − esimene token),
+> Tokenite arvud tulevad serveri `usage`-väljast (vLLM/SGLang täpne), muidu **hinnatakse** (~4 tähemärki
+> tokeni kohta). Kui server jätab `usage` ära (nn vaikne semantiline degradatsioon — parameeter kaob,
+> aga vastus on 200 OK), **kõik tok/s numbrid on ligikaudsed** — tööriist märgib sellised read
+> **⚠ est tokens** ja lisab soovitusse hoiatuse (veerg `est_frac` ekspordis). Lisaks arvutatakse
+> per-päring **decode-kiirus** (väljund / (lõpp − esimene token),
 > ilma prefill'ita) — Benchmark-tabi koormustestis real "per-req decode tok/s (mean)".
 
 ### Erinevad prefiksid (prefix-affinity ruutimise vältimine)

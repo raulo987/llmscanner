@@ -216,6 +216,11 @@ class LLMClient:
         if first is None:
             first = end
         text = "".join(parts)
+        # Track whether either count is a guess rather than a server-reported usage
+        # number — if so, every tok/s derived from it is only approximate, and the
+        # caller should say so (a silently-dropped usage block reads as "success").
+        c_usage = bool(usage and usage.get("completion_tokens"))
+        p_usage = bool(usage and usage.get("prompt_tokens"))
         if usage:
             ctoks = int(usage.get("completion_tokens") or chunks or approx_tokens(text))
             ptoks = int(usage.get("prompt_tokens") or approx_tokens(prompt))
@@ -223,6 +228,7 @@ class LLMClient:
             # No usage block: streamed chunks ≈ tokens; otherwise estimate from text.
             ctoks = chunks if chunks else approx_tokens(text)
             ptoks = approx_tokens(prompt)
+        est_tokens = not (c_usage and p_usage)
         # Decode time = first→end when streamed; for a non-streamed body use total time.
         gen_time = max((end - first) if streamed else (end - start), 1e-9)
         output_tps = ctoks / gen_time if ctoks else 0.0
@@ -234,4 +240,5 @@ class LLMClient:
             completion_tokens=ctoks,
             output_tps=output_tps,
             text=text,
+            est_tokens=est_tokens,
         )

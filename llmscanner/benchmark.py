@@ -70,6 +70,7 @@ class LoadStats:
     tpot_ms: float = 0.0            # mean time per output token, excl. 1st (decode latency)
     req_per_s: float = 0.0          # request throughput — successful requests / wall
     peak_out_tps: float = 0.0       # peak output tok/s over any 1 s window (completion-based)
+    est_frac: float = 0.0           # fraction of ok requests whose token counts were estimated
     errors: list[str] = field(default_factory=list)
 
 
@@ -192,6 +193,7 @@ async def load(client: LLMClient, model: str, *, concurrency: int = 8,
         tpot_ms=1000.0 * statistics.mean(tpots) if tpots else 0.0,
         req_per_s=len(ok) / wall if wall else 0.0,
         peak_out_tps=peak,
+        est_frac=(sum(1 for r in ok if r.est_tokens) / len(ok)) if ok else 0.0,
         errors=errors[:5],
     )
 
@@ -408,6 +410,7 @@ class OptPoint:
     req_per_s: float        # request throughput (successful requests / wall)
     peak_out_tps: float     # peak output tok/s over any 1 s window
     gen_actual: float       # mean output tokens actually generated per request
+    est_frac: float         # fraction of requests whose token counts were estimated
     feasible: bool
     note: str = ""
 
@@ -453,7 +456,7 @@ async def _measure(client: LLMClient, model: str, *, phase: str, concurrency: in
     return OptPoint(phase, concurrency, ctx_tokens, max_tokens, requests, stt.success,
                     stt.aggregate_tps, stt.input_tps, stt.total_tps, stt.latency_p50,
                     stt.latency_p95, stt.ttft_p95, stt.tpot_ms, stt.req_per_s,
-                    stt.peak_out_tps, gen_actual, feasible, note)
+                    stt.peak_out_tps, gen_actual, stt.est_frac, feasible, note)
 
 
 DEFAULT_OPT_SIZES = [1024, 2048, 4096, 8192, 16384]

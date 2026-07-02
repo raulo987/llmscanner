@@ -939,6 +939,9 @@ class App:
         elif p.note:  # feasible but flagged (e.g. under-generation)
             verdict = "⚠ " + p.note
             tags = (tags[0], "infeas")  # reuse the warning colour
+        elif p.est_frac >= 0.5:  # token counts guessed — tok/s only approximate
+            verdict = "⚠ est tokens (no usage)"
+            tags = (tags[0], "infeas")
         else:
             verdict = "✅ feasible"
         iid = self.opt_tree.insert("", "end", tags=tags, values=(
@@ -1009,6 +1012,10 @@ class App:
         if undergen:
             lines.append(f"⚠ {len(undergen)} point(s) under-generated (server ignored ignore_eos — "
                          "generated far fewer tokens than requested); their out/TPOT understate decode")
+        estimated = [p for p in ok_pts if p.est_frac >= 0.5]
+        if estimated:
+            lines.append(f"⚠ {len(estimated)} point(s) had estimated token counts (server sent no "
+                         "usage) — their in/out/total tok/s are approximate (~4 chars/token guess)")
         if summary.get("aborted"):
             lines.append(f"Note: {summary['aborted']}")
         reco = "  •  ".join(lines) if lines else "No optima found."
@@ -1033,7 +1040,8 @@ class App:
 
     _OPT_HEADER = ["phase", "concurrency", "ctx_tokens", "gen_tokens", "gen_actual", "requests",
                    "success", "in_tok_s", "out_tok_s", "total_tok_s", "tpot_ms", "req_per_s",
-                   "peak_out_tok_s", "lat_p50_s", "lat_p95_s", "ttft_p95_s", "feasible", "note"]
+                   "peak_out_tok_s", "est_frac", "lat_p50_s", "lat_p95_s", "ttft_p95_s",
+                   "feasible", "note"]
 
     def _opt_table(self) -> list[list]:
         """Header + one row per measured point (shared by CSV/clipboard export)."""
@@ -1042,8 +1050,9 @@ class App:
             rows.append([p.phase, p.concurrency, p.ctx_tokens, p.gen_tokens, f"{p.gen_actual:.0f}",
                          p.requests, p.success, f"{p.input_tps:.2f}", f"{p.agg_tps:.2f}",
                          f"{p.total_tps:.2f}", (f"{p.tpot_ms:.3f}" if p.tpot_ms > 0 else ""),
-                         f"{p.req_per_s:.4f}", f"{p.peak_out_tps:.2f}", f"{p.lat_p50:.4f}",
-                         f"{p.lat_p95:.4f}", f"{p.ttft_p95:.4f}", int(p.feasible), p.note])
+                         f"{p.req_per_s:.4f}", f"{p.peak_out_tps:.2f}", f"{p.est_frac:.2f}",
+                         f"{p.lat_p50:.4f}", f"{p.lat_p95:.4f}", f"{p.ttft_p95:.4f}",
+                         int(p.feasible), p.note])
         return rows
 
     def export_optima(self):
@@ -1835,6 +1844,9 @@ class App:
                 ("TTFT p50 / p95 (s)", f"{stt.ttft_p50:.3f} / {stt.ttft_p95:.3f}"),
                 ("latency p50 / p95 (s)", f"{stt.latency_p50:.2f} / {stt.latency_p95:.2f}"),
             ]
+            if stt.est_frac >= 0.5:
+                rows.append(("⚠ token counts", f"estimated (~4 chars/tok) — server sent no usage; "
+                                               "tok/s approximate"))
             for i, e in enumerate(stt.errors[:3]):
                 rows.append((f"error {i + 1}", e[:60]))
             summary = (f"out {stt.aggregate_tps:.0f} / in {stt.input_tps:.0f} tok/s · "
