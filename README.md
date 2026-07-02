@@ -138,8 +138,9 @@ päringuid** ja **kui suuri päringuid** mudelile korraga tasub anda. Kasutab Co
 mudelit ja timeouti. Töö on jagatud faasidesse (A–B alati, C–E valikulised):
 
 1. **Faas A — max kontekst.** Leiab suurima üksikpäringu, mis õnnestub (kuni valitav lagi, vaikimisi
-   256k tokenit). Eelistab serveri teatatud `max_model_len` väärtust (vLLM), muidu loeb limiidi
-   veateatest või teeb binaarotsingu — nii saadetakse võimalikult vähe ülisuuri päringuid.
+   65536 tokenit — sea serveri `--max-model-len` järgi). Eelistab serveri teatatud `max_model_len`
+   väärtust (vLLM), muidu loeb limiidi veateatest või teeb binaarotsingu — nii saadetakse võimalikult
+   vähe ülisuuri päringuid.
 2. **Faas B — concurrency sweep.** Käib paralleelsustasemed läbi (nt 1→128) mõõduka kontekstiga ja
    **peatub varakult**, kui läbilaskevõime jõuab platoole või tase hakkab vigu andma. Raporteerib:
    - **peak-throughput** paralleelsuse (max agregeeritud tok/s);
@@ -251,7 +252,7 @@ timeout — ei tehta täielikku 128×256k ristkorrutist.
 > ⚠️ Optimum finder on **koormustest**: käivita seda ainult serverite vastu, mida sa **omad või millel
 > on luba testida**.
 
-**Settle-paus:** iga mõõtmise ette tehakse paus (vaikimisi **2 s**), et server jõuaks eelmise pursa
+**Settle-paus:** iga mõõtmise ette tehakse paus (vaikimisi **3 s**), et server jõuaks eelmise pursa
 maha laadida — vabastada KV-cache, tühjendada järjekord, lasta rate-limit aknal taastuda — enne kui
 järgmist concurrency't / suurust / profiili testitakse. Ilma selleta **valgub ühe taseme jääkkoormus
 järgmisesse** (nt petlikud "at capacity" 429-d, mis on tegelikult vaid virna laotud päringud). Tõsta

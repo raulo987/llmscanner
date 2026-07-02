@@ -116,8 +116,8 @@ INFO = {
         "levels just return 'at capacity' 429s and waste time. Default ends at 64."),
     "opt_ctxcap": (
         "Upper bound (tokens) for the phase-A max-context probe; prompts larger than "
-        "this are never tried. Default 262144 (256k). Lower it to make the search "
-        "cheaper on models with a big advertised limit."),
+        "this are never tried. Set it to the server's --max-model-len (default 65536). "
+        "The finder prefers the server-advertised limit anyway, so this is just a ceiling."),
     "opt_basectx": (
         "Prompt size (input tokens) used during the phase-B concurrency sweep. Kept "
         "modest (default 1024) so the sweep isolates concurrency, not prompt size."),
@@ -167,7 +167,7 @@ INFO = {
         "batch — free KV cache, empty its queue, let a rate-limit window reset — before "
         "the next concurrency/size/profile is tested.\n\n"
         "Without it, leftover load from one level bleeds into the next (e.g. spurious "
-        "'at capacity' 429s that are really just stacked requests). Default 2 s. Raise "
+        "'at capacity' 429s that are really just stacked requests). Default 3 s. Raise "
         "for a shared/rate-limited gateway; set 0 for a dedicated local server."),
     "opt_distinct": (
         "Give every request a unique random preamble so prefix-affinity load-balancers "
@@ -727,7 +727,7 @@ class App:
         self.var_opt_basectx = tk.StringVar(value="1024")
         self.var_opt_gentok = tk.StringVar(value="64")
         self.var_opt_rpw = tk.StringVar(value="2")
-        self.var_opt_ctxcap = tk.StringVar(value="262144")
+        self.var_opt_ctxcap = tk.StringVar(value="65536")
         self.var_opt_minok = tk.StringVar(value="90")
         self.var_opt_frontier = tk.BooleanVar(value=True)
         self.var_opt_distinct = tk.BooleanVar(value=True)
@@ -736,7 +736,7 @@ class App:
         self.var_opt_profiles = tk.BooleanVar(value=False)
         self.var_opt_proflist = tk.StringVar(value="8000/1000, 1000/8000, 1000/1000")
         self.var_opt_profconc = tk.StringVar(value="16")
-        self.var_opt_settle = tk.StringVar(value="2")
+        self.var_opt_settle = tk.StringVar(value="3")
 
         sec, top = self._section(self.tab_opt, "What to find")
         sec.pack(fill="x", padx=12, pady=(10, 6))
