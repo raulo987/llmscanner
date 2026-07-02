@@ -931,12 +931,18 @@ class App:
         # TPOT is 0 only when the server didn't stream token-by-token (TTFT == total
         # latency) — show "–" rather than a misleading 0.000.
         tpot = f"{p.tpot_ms:.1f}" if p.tpot_ms > 0 else "–"
+        if not p.feasible:
+            verdict = "❌ " + (p.note or "failed")
+        elif p.note:  # feasible but flagged (e.g. under-generation)
+            verdict = "⚠ " + p.note
+            tags = (tags[0], "infeas")  # reuse the warning colour
+        else:
+            verdict = "✅ feasible"
         iid = self.opt_tree.insert("", "end", tags=tags, values=(
             p.phase, p.concurrency, f"{p.ctx_tokens:,}", p.gen_tokens, p.requests,
             f"{p.success}/{p.requests}", f"{p.input_tps:.0f}", f"{p.agg_tps:.0f}",
             f"{p.total_tps:.0f}", tpot, f"{p.lat_p50:.2f}", f"{p.lat_p95:.2f}",
-            f"{p.ttft_p95:.3f}",
-            "✅ feasible" if p.feasible else ("❌ " + (p.note or "failed"))))
+            f"{p.ttft_p95:.3f}", verdict))
         self._opt_iids[id(p)] = iid
         self.opt_tree.see(iid)
         self.opt_log.result(f"{p.phase} c={p.concurrency} ctx={p.ctx_tokens:,} gen={p.gen_tokens}",
@@ -996,6 +1002,10 @@ class App:
         if ok_pts and not any(p.tpot_ms > 0 for p in ok_pts):
             lines.append("TPOT n/a — the server did not stream tokens (TTFT = full latency), "
                          "likely a buffering gateway; per-token decode latency can't be measured")
+        undergen = [p for p in ok_pts if p.note.startswith("under-gen")]
+        if undergen:
+            lines.append(f"⚠ {len(undergen)} point(s) under-generated (server ignored ignore_eos — "
+                         "generated far fewer tokens than requested); their out/TPOT understate decode")
         if summary.get("aborted"):
             lines.append(f"Note: {summary['aborted']}")
         reco = "  •  ".join(lines) if lines else "No optima found."
@@ -1018,16 +1028,16 @@ class App:
         series = [(f"c{p.concurrency}", getter(p)) for p in sorted(pts, key=lambda p: p.concurrency)]
         self.opt_chart.plot(series, title=f"{metric} vs concurrency", unit=unit)
 
-    _OPT_HEADER = ["phase", "concurrency", "ctx_tokens", "gen_tokens", "requests", "success",
-                   "in_tok_s", "out_tok_s", "total_tok_s", "tpot_ms", "req_per_s",
+    _OPT_HEADER = ["phase", "concurrency", "ctx_tokens", "gen_tokens", "gen_actual", "requests",
+                   "success", "in_tok_s", "out_tok_s", "total_tok_s", "tpot_ms", "req_per_s",
                    "peak_out_tok_s", "lat_p50_s", "lat_p95_s", "ttft_p95_s", "feasible", "note"]
 
     def _opt_table(self) -> list[list]:
         """Header + one row per measured point (shared by CSV/clipboard export)."""
         rows = [list(self._OPT_HEADER)]
         for p in self._opt_points:
-            rows.append([p.phase, p.concurrency, p.ctx_tokens, p.gen_tokens, p.requests,
-                         p.success, f"{p.input_tps:.2f}", f"{p.agg_tps:.2f}",
+            rows.append([p.phase, p.concurrency, p.ctx_tokens, p.gen_tokens, f"{p.gen_actual:.0f}",
+                         p.requests, p.success, f"{p.input_tps:.2f}", f"{p.agg_tps:.2f}",
                          f"{p.total_tps:.2f}", (f"{p.tpot_ms:.3f}" if p.tpot_ms > 0 else ""),
                          f"{p.req_per_s:.4f}", f"{p.peak_out_tps:.2f}", f"{p.lat_p50:.4f}",
                          f"{p.lat_p95:.4f}", f"{p.ttft_p95:.4f}", int(p.feasible), p.note])

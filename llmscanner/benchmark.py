@@ -407,6 +407,7 @@ class OptPoint:
     tpot_ms: float          # mean time per output token, excl. 1st (decode latency)
     req_per_s: float        # request throughput (successful requests / wall)
     peak_out_tps: float     # peak output tok/s over any 1 s window
+    gen_actual: float       # mean output tokens actually generated per request
     feasible: bool
     note: str = ""
 
@@ -441,13 +442,18 @@ async def _measure(client: LLMClient, model: str, *, phase: str, concurrency: in
     # to pass than a smaller one at the same min_success).
     allowed_fail = int(requests * (1.0 - min_success))
     feasible = stt.success > 0 and (requests - stt.success) <= allowed_fail
+    gen_actual = stt.total_completion_tokens / stt.success if stt.success else 0.0
     note = ""
     if not feasible and stt.errors:
         note = stt.errors[0][:80]
+    elif feasible and max_tokens >= 8 and gen_actual < 0.5 * max_tokens:
+        # The server generated far fewer tokens than requested — ignore_eos was
+        # not honored (it likely fell back), so out/TPOT here understate decode.
+        note = f"under-gen: {gen_actual:.0f}/{max_tokens} out tok (ignore_eos not honored?)"
     return OptPoint(phase, concurrency, ctx_tokens, max_tokens, requests, stt.success,
                     stt.aggregate_tps, stt.input_tps, stt.total_tps, stt.latency_p50,
                     stt.latency_p95, stt.ttft_p95, stt.tpot_ms, stt.req_per_s,
-                    stt.peak_out_tps, feasible, note)
+                    stt.peak_out_tps, gen_actual, feasible, note)
 
 
 DEFAULT_OPT_SIZES = [1024, 2048, 4096, 8192, 16384]
