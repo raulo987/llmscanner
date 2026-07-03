@@ -26,6 +26,8 @@ rasket Qt-installi) ja lisaks boonusena käsurea-liides skriptimiseks.
 - 🌐 **Võrguskann** – skannib kohaliku alamvõrgu (nt `192.168.1.0/24`) ja leiab töötavad LLM-serverid.
 - 🎯 **Optimum finder** – eraldi tab, mis **automaatselt leiab optimaalse paralleelsuse ja suurima
   töötava päringusuuruse**. Vt [Optimum finder](#optimum-finder).
+- ⏳ **Soak-test** – hoiab fikseeritud koormust N minutit ja mõõdab **püsivat tokenit sisse/välja
+  tunnis** (+ kas läbilaskevõime püsib stabiilne). Vt [Soak-test](#soak-test).
 - 📊 **Testid** (Benchmark-tab):
   - **Kiirus** – latentsus (TTFT, aeg esimese tokenini) + läbilaskevõime (dekodeerimise tokenit/s).
   - **Koormustest** – N paralleelset päringut; agregeeritud tok/s ja p50/p95 latentsus.
@@ -265,6 +267,29 @@ Seadistatav: **paralleelsustasemed** (vaikimisi `1,2,4,8,16,24,32,48,64`), päri
 (vaikimisi 1024–65536), genereerimispikkuste loend, workload-profiilid, concurrency-faasi kontekst,
 gen-tokenid päringu kohta, päringuid töölise kohta, konteksti lagi, min success %, **settle-paus**, ja
 kas teha päringusuuruste / genereerimispikkuse / profiili sweep.
+
+## Soak-test
+
+**Soak**-tab mõõdab **püsivat läbilaskevõimet — kui palju tokeneid sisse ja välja server (koos oma
+backendidega) tegelikult tunnis annab** pideva koormuse all. Erinevalt teistest testidest (mis
+saadavad fikseeritud arvu päringuid ja lõpetavad) hoiab soak-test **fikseeritud concurrency't kindla
+aja jooksul** (nt 30 min) ja saadab pidevalt päringuid.
+
+- `concurrency` töölist saadavad päringuid järjest, nii et **täpselt `concurrency` päringut on kogu aeg
+  õhus.**
+- Reaalajas kuvatakse: **IN / OUT / TOTAL tok/s** ja nende **tokenit/tunnis** projektsioon
+  (`tok/s × 3600`), req/s, TPOT, latents, vead — ning **väljund-tok/s minutis graafik** (kas
+  läbilaskevõime **püsib stabiilne** või langeb: termiline throttling, mälu, gateway-tõrked).
+- Väljundpikkus forsitakse `ignore_eos`-iga; **suure väljundi puhul tõsta Timeout.**
+- Jooksu saab **Stop**-nupuga katkestada (viimased numbrid jäävad nähtavale).
+
+**Näide:** concurrency 64, sisend 4000 / väljund 500 tokenit (RAG-tüüpi), 30 min → näed nt
+"IN 136 M/h · OUT 7.6 M/h" ja kas see püsis 30 min jooksul.
+
+> **Vali concurrency targalt:** jooksuta enne **Optimum finder**, kasuta selle peak/knee väärtust —
+> siis mõõdab soak-test *maksimaalset* püsivat läbilaskevõimet. Ja mäleta, et tokenit/tunnis sõltub
+> töökoormuse kujust (sisend/väljund suhe): RAG-koormus annab palju tokenit **sisse**, chat/agentic
+> rohkem **välja**.
 
 ## Kuidas see töötab
 

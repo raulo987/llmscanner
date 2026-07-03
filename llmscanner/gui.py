@@ -188,6 +188,26 @@ INFO = {
     "scan_ports": (
         "Ports to probe on each host, comma-separated (ranges like 8000-8010 allowed). "
         "Defaults cover common LLM servers (vLLM, SGLang, Ollama, llama.cpp, …)."),
+    # ---- Soak ----
+    "soak_conc": (
+        "How many requests to keep in flight continuously for the whole run. Set it to "
+        "your throughput optimum (run the Optimum finder first) or your aggregate "
+        "max concurrency. This is the sustained load the tokens/hour figure is measured at."),
+    "soak_in": (
+        "Input (prompt) tokens per request — the 'question' size. Pick what's typical of "
+        "your real traffic (e.g. 4000 for RAG/long-context, ~500 for chat). Bigger input = "
+        "more tokens IN per hour, more prefill work."),
+    "soak_out": (
+        "Max output tokens per request — the 'answer' size. Forced with ignore_eos so each "
+        "request decodes this many. Bigger output = more tokens OUT per hour, longer requests."),
+    "soak_dur": (
+        "How long to run, in minutes. A longer run (30+) reveals whether throughput holds "
+        "steady or drifts (thermal throttling, memory, gateway hiccups). The tokens/hour "
+        "figure is the sustained average over the whole run."),
+    "soak_distinct": (
+        "Give each request a unique preamble so a prefix-affinity gateway spreads the load "
+        "across all backends (essential for a multi-machine cluster — otherwise it pins to "
+        "one). Keep on unless you deliberately want single-backend numbers."),
     # ---- History ----
     "hist_filter": (
         "Type to filter the results list — matches host, model, test type and summary. "
@@ -557,12 +577,14 @@ class App:
         self.tab_conn = self.tabview.add("Connection")
         self.tab_bench = self.tabview.add("Benchmark")
         self.tab_opt = self.tabview.add("Optimum finder")
+        self.tab_soak = self.tabview.add("Soak")
         self.tab_scan = self.tabview.add("Network scan")
         self.tab_history = self.tabview.add("History")
 
         self._build_conn_tab()
         self._build_bench_tab()
         self._build_opt_tab()
+        self._build_soak_tab()
         self._build_scan_tab()
         self._build_history_tab()
 
@@ -1117,6 +1139,162 @@ class App:
         self._set_status(f"Copied benchmark comparison ({len(rows) - 1} rows) to the clipboard.")
         self.bench_log.write(f"📋 Copied comparison ({len(rows) - 1} rows) to clipboard", "ok")
 
+    # ------------------------------------------------------------------- Soak
+    def _build_soak_tab(self):
+        self.var_soak_conc = tk.StringVar(value="64")
+        self.var_soak_in = tk.StringVar(value="4000")
+        self.var_soak_out = tk.StringVar(value="500")
+        self.var_soak_dur = tk.StringVar(value="30")
+        self.var_soak_distinct = tk.BooleanVar(value=True)
+
+        sec, top = self._section(self.tab_soak, "Sustained throughput (tokens / hour)")
+        sec.pack(fill="x", padx=12, pady=(10, 6))
+
+        def field(r, c, label, var, info, w=90):
+            self._lbl(top, label, info).grid(row=r, column=c, sticky="e", padx=(12, 4), pady=5)
+            ctk.CTkEntry(top, textvariable=var, width=w).grid(row=r, column=c + 1, sticky="w", pady=5)
+
+        field(0, 0, "Concurrency", self.var_soak_conc, INFO["soak_conc"])
+        field(0, 2, "Duration (min)", self.var_soak_dur, INFO["soak_dur"])
+        field(1, 0, "Input tokens / req", self.var_soak_in, INFO["soak_in"])
+        field(1, 2, "Output tokens / req", self.var_soak_out, INFO["soak_out"])
+        fr = ctk.CTkFrame(top, fg_color="transparent")
+        fr.grid(row=2, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
+        ctk.CTkCheckBox(fr, text="Distinct request prefixes (spread across backends)",
+                        variable=self.var_soak_distinct).pack(side="left")
+        self._info_icon(fr, "Distinct request prefixes", INFO["soak_distinct"]).pack(side="left", padx=(5, 0))
+
+        runbar = ctk.CTkFrame(self.tab_soak, fg_color="transparent")
+        runbar.pack(fill="x", padx=12, pady=4)
+        self.btn_soak = ctk.CTkButton(runbar, text="Run soak test", command=self.on_run_soak)
+        self.btn_soak.pack(side="left")
+        btn_soak_cancel = ctk.CTkButton(runbar, text="Stop", width=80, state="disabled",
+                                        fg_color="#b04a4a", hover_color="#963c3c",
+                                        command=self.cancel_current)
+        btn_soak_cancel.pack(side="left", padx=8)
+        self._cancel_btns.append(btn_soak_cancel)
+        ctk.CTkLabel(runbar, text="Holds the load continuously and reports the sustained "
+                                  "in/out token rate — raise the Timeout for large output sizes.",
+                     text_color=self.pal["sub"]).pack(side="left", padx=10)
+
+        # Big live readout
+        self.soak_readout = ctk.CTkLabel(
+            self.tab_soak, text="Set the load and press ‘Run soak test’.",
+            anchor="w", justify="left", font=ctk.CTkFont(size=15, weight="bold"))
+        self.soak_readout.pack(fill="x", padx=16, pady=(2, 4))
+
+        sec3, body = self._section(self.tab_soak, "Live")
+        sec3.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        split = ttk.PanedWindow(body, orient="horizontal")
+        split.pack(fill="both", expand=True)
+        left = ctk.CTkFrame(split, fg_color="transparent")
+        right = ctk.CTkFrame(split)
+        split.add(left, weight=3)
+        split.add(right, weight=2)
+        self.soak_chart = ChartCanvas(left, height=220)
+        self.soak_chart.pack(fill="both", expand=True)
+        self.soak_log = LiveLog(right, self.pal, fg_color="transparent")
+        self.soak_log.pack(fill="both", expand=True)
+
+    @staticmethod
+    def _fmt_hms(sec: float) -> str:
+        sec = int(max(0, sec))
+        return f"{sec // 60:02d}:{sec % 60:02d}"
+
+    @staticmethod
+    def _fmt_per_hour(v: float) -> str:
+        if v >= 1e9:
+            return f"{v / 1e9:.2f} B/h"
+        if v >= 1e6:
+            return f"{v / 1e6:.2f} M/h"
+        if v >= 1e3:
+            return f"{v / 1e3:.1f} K/h"
+        return f"{v:.0f}/h"
+
+    def on_run_soak(self):
+        try:
+            target = resolve_target(self.var_host.get(), self.var_port.get())
+            cfg = {
+                "concurrency": max(1, int(self.var_soak_conc.get())),
+                "ctx_tokens": max(1, int(self.var_soak_in.get())),
+                "gen_tokens": max(1, int(self.var_soak_out.get())),
+                "duration_s": max(1.0, float(self.var_soak_dur.get()) * 60.0),
+                "distinct_prefix": bool(self.var_soak_distinct.get()),
+                "timeout": float(self.var_timeout.get() or 95),
+            }
+        except ValueError as e:
+            return self._error(ValueError(f"Invalid number: {e}"))
+
+        self._soak_target_out = cfg["gen_tokens"]
+        client = LLMClient.from_target(
+            target, api_key=self.var_apikey.get().strip() or "EMPTY",
+            timeout=cfg["timeout"], endpoint=self.var_endpoint.get())
+        self._remember_endpoint(target.host, target.port)
+        self.soak_chart.clear()
+        self.soak_log.clear()
+        mins = cfg["duration_s"] / 60.0
+        self.soak_log.write(f"▶ Soak · {client.base_url}", "head")
+        self.soak_log.write(f"        c={cfg['concurrency']} · in {cfg['ctx_tokens']} / "
+                            f"out {cfg['gen_tokens']} tok · {mins:g} min", "dim")
+        self.soak_readout.configure(text=f"Starting… c={cfg['concurrency']}, "
+                                         f"{cfg['ctx_tokens']}/{cfg['gen_tokens']} tok, {mins:g} min")
+
+        def on_progress(snap):
+            self.post(lambda s=snap: self._soak_progress(s))
+
+        self.run_async(
+            B.soak_test(client, self._resolved_model(),
+                        concurrency=cfg["concurrency"], ctx_tokens=cfg["ctx_tokens"],
+                        gen_tokens=cfg["gen_tokens"], duration_s=cfg["duration_s"],
+                        distinct_prefix=cfg["distinct_prefix"], on_progress=on_progress),
+            self._soak_done, status="Soak test running…")
+
+    def _soak_readout_text(self, s: dict) -> str:
+        warn = ""
+        target_out = getattr(self, "_soak_target_out", 1)
+        if s["gen_actual"] < 0.5 * target_out and s["success"]:
+            warn += "  ⚠ under-gen"
+        if s["est_frac"] >= 0.5:
+            warn += "  ⚠ est-tokens"
+        return (
+            f"⏱ {self._fmt_hms(s['elapsed'])} / {self._fmt_hms(s['duration'])}   "
+            f"({s['success']} ok, {s['errors']} failed · {s['req_per_s']:.1f} req/s)\n"
+            f"IN    {s['in_tps']:>10,.0f} tok/s   →   {self._fmt_per_hour(s['in_per_hour'])}\n"
+            f"OUT   {s['out_tps']:>10,.0f} tok/s   →   {self._fmt_per_hour(s['out_per_hour'])}\n"
+            f"TOTAL {s['total_tps']:>10,.0f} tok/s   →   {self._fmt_per_hour(s['total_per_hour'])}"
+            f"     · TPOT {s['tpot_ms']:.1f}ms · p95 {s['lat_p95']:.1f}s{warn}"
+        )
+
+    def _soak_progress(self, s: dict):
+        self.soak_readout.configure(text=self._soak_readout_text(s))
+        self._set_status(f"Soak: {self._fmt_hms(s['remaining'])} left · "
+                         f"out {s['out_tps']:.0f} tok/s")
+        if s.get("series"):
+            self.soak_chart.plot([(f"{m}m", out) for m, out, _in in s["series"]],
+                                 title="output tok/s per minute", unit="tok/s")
+
+    def _soak_done(self, s: dict):
+        self._soak_progress(s)
+        self.soak_log.write("✓ Soak complete", "ok")
+        self.soak_log.result(
+            "Sustained throughput",
+            f"IN {self._fmt_per_hour(s['in_per_hour'])} · OUT {self._fmt_per_hour(s['out_per_hour'])} · "
+            f"TOTAL {self._fmt_per_hour(s['total_per_hour'])}",
+            [("input tok/s", f"{s['in_tps']:.0f}"),
+             ("output tok/s", f"{s['out_tps']:.0f}"),
+             ("total tok/s", f"{s['total_tps']:.0f}"),
+             ("in tokens (run)", f"{s['in_tokens']:,}"),
+             ("out tokens (run)", f"{s['out_tokens']:,}"),
+             ("requests", f"{s['success']} ok / {s['errors']} failed"),
+             ("req/s", f"{s['req_per_s']:.2f}"),
+             ("TPOT (ms)", f"{s['tpot_ms']:.1f}" if s['tpot_ms'] > 0 else "–"),
+             ("latency p50 / p95 (s)", f"{s['lat_p50']:.2f} / {s['lat_p95']:.2f}"),
+             ("mean output tok/req", f"{s['gen_actual']:.0f} / {getattr(self, '_soak_target_out', '?')}"),
+             ("est tokens", f"{s['est_frac'] * 100:.0f}%")])
+        for e in s.get("error_samples", []):
+            self.soak_log.write(f"   error: {e[:70]}", "err")
+        self._set_status("Soak test complete.")
+
     def _build_scan_tab(self):
         sec, top = self._section(self.tab_scan, "Scan settings")
         sec.pack(fill="x", padx=12, pady=10)
@@ -1429,7 +1607,7 @@ class App:
 
     def _on_cancelled(self):
         self._set_status("Cancelled.")
-        for log in (getattr(self, "bench_log", None), getattr(self, "opt_log", None)):
+        for log in (getattr(self, "bench_log", None), getattr(self, "opt_log", None), getattr(self, "soak_log", None)):
             if log is not None:
                 log.write("✗ Cancelled by user", "err")
 
@@ -1441,7 +1619,8 @@ class App:
     def _set_busy(self, busy: bool, status: str = ""):
         self._busy = busy
         state = "disabled" if busy else "normal"
-        for b in (self.btn_detect, self.btn_models, self.btn_run, self.btn_scan, self.btn_opt):
+        for b in (self.btn_detect, self.btn_models, self.btn_run, self.btn_scan,
+                  self.btn_opt, self.btn_soak):
             b.configure(state=state)
         # Cancel buttons are the inverse: only usable while a task is running.
         for b in self._cancel_btns:
@@ -1464,7 +1643,7 @@ class App:
 
     def _error(self, err: Exception):
         self._set_status(f"Error: {err}")
-        for log in (getattr(self, "bench_log", None), getattr(self, "opt_log", None)):
+        for log in (getattr(self, "bench_log", None), getattr(self, "opt_log", None), getattr(self, "soak_log", None)):
             if log is not None:
                 log.write(f"✗ {err}", "err")
         messagebox.showerror(APP_TITLE, str(err))

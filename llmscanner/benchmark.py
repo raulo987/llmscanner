@@ -640,3 +640,110 @@ async def find_optima(client: LLMClient, model: Optional[str], *,
             emit(p)
 
     return summary
+
+
+# --------------------------------------------------------------------------- #
+#  Soak test — sustained load over a fixed duration → tokens/hour
+# --------------------------------------------------------------------------- #
+
+async def soak_test(client: LLMClient, model: Optional[str], *, concurrency: int,
+                    ctx_tokens: int, gen_tokens: int, duration_s: float,
+                    distinct_prefix: bool = True, force_output: bool = True,
+                    report_interval: float = 5.0,
+                    on_progress: Optional[Callable[[dict], None]] = None) -> dict:
+    """Hold `concurrency` requests in flight for `duration_s` seconds and measure
+    the SUSTAINED input/output token rate — i.e. tokens per hour the server (and
+    its backends) actually delivers under continuous load.
+
+    `concurrency` worker coroutines each fire requests back-to-back until the
+    deadline, so exactly `concurrency` requests are in flight the whole time.
+    Reports cumulative in/out/total tok/s (× 3600 → tokens/hour), req/s, latency,
+    TPOT, error rate, and per-minute output tok/s to reveal any drift/throttling.
+    Calls `on_progress(snapshot)` every `report_interval` seconds.
+    """
+    if not model:
+        try:
+            models = await client.list_models()
+            model = models[0] if models else None
+        except Exception:
+            model = None
+        if not model:
+            raise RuntimeError("No model specified and model listing failed.")
+    salt_tokens = 64
+    start = time.perf_counter()
+    deadline = start + max(1.0, duration_s)
+    # Lightweight per-request records (no generated text kept, so a long run
+    # doesn't balloon memory): (t_rel, ok, ptoks, ctoks, ttft, total_time, est, err)
+    recs: list[tuple] = []
+
+    def build_body() -> str:
+        salt = (_unique_prefix(salt_tokens) + "\n") if distinct_prefix else ""
+        budget = max(1, ctx_tokens - (salt_tokens if distinct_prefix else 0))
+        return (salt + _filler(budget, lead=random.randint(0, 10 ** 9)) +
+                "\n\nUsing the text above as context, write a long, detailed "
+                "continuation. Keep writing and do not stop.")
+
+    async def worker():
+        while time.perf_counter() < deadline:
+            r = await client.generate(model=model, prompt=build_body(),
+                                      max_tokens=gen_tokens, force_output=force_output)
+            recs.append((time.perf_counter() - start, r.ok, r.prompt_tokens,
+                         r.completion_tokens, r.ttft, r.total_time, r.est_tokens,
+                         "" if r.ok else r.error))
+            if not r.ok:
+                # Back off on failure so a down / at-capacity server isn't hammered
+                # in a tight loop (which would also grow `recs` without bound).
+                await asyncio.sleep(0.5)
+
+    def snapshot() -> dict:
+        el = max(time.perf_counter() - start, 1e-9)
+        ok = [x for x in recs if x[1]]
+        tin = sum(x[2] for x in ok)
+        tout = sum(x[3] for x in ok)
+        errs = [x[7] for x in recs if not x[1]]
+        in_tps = tin / el
+        out_tps = tout / el
+        tpots = [(x[5] - x[4]) / (x[3] - 1) for x in ok if x[3] > 1 and x[5] > x[4]]
+        # per-minute output tok/s time-series (stability / throttling). Each bucket
+        # is divided by the seconds it actually spans, so the in-progress final
+        # minute (and a sub-minute run) isn't understated by dividing by 60.
+        buckets: dict = {}
+        for x in ok:
+            m = int(x[0] // 60)
+            b = buckets.setdefault(m, [0, 0])
+            b[0] += x[3]; b[1] += x[2]
+        series = []
+        for m in sorted(buckets):
+            secs = max(min(60.0, el - m * 60.0), 1e-9)
+            series.append((m, buckets[m][0] / secs, buckets[m][1] / secs))
+        return {
+            "elapsed": el, "remaining": max(0.0, deadline - time.perf_counter()),
+            "duration": duration_s, "concurrency": concurrency,
+            "requests": len(recs), "success": len(ok), "errors": len(errs),
+            "in_tokens": tin, "out_tokens": tout,
+            "in_tps": in_tps, "out_tps": out_tps, "total_tps": in_tps + out_tps,
+            "in_per_hour": in_tps * 3600.0, "out_per_hour": out_tps * 3600.0,
+            "total_per_hour": (in_tps + out_tps) * 3600.0,
+            "req_per_s": len(ok) / el,
+            "tpot_ms": 1000.0 * statistics.mean(tpots) if tpots else 0.0,
+            "lat_p50": _pct([x[5] for x in ok], 0.5),
+            "lat_p95": _pct([x[5] for x in ok], 0.95),
+            "est_frac": (sum(1 for x in ok if x[6]) / len(ok)) if ok else 0.0,
+            "gen_actual": (tout / len(ok)) if ok else 0.0,
+            "error_samples": errs[:3],
+            "series": series,
+        }
+
+    async def reporter():
+        while time.perf_counter() < deadline:
+            await asyncio.sleep(report_interval)
+            if on_progress:
+                on_progress(snapshot())
+
+    workers = [asyncio.create_task(worker()) for _ in range(max(1, concurrency))]
+    rep = asyncio.create_task(reporter())
+    try:
+        await asyncio.gather(*workers)
+    finally:
+        rep.cancel()
+    return snapshot()
