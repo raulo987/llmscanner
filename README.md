@@ -283,6 +283,15 @@ aja jooksul** (nt 30 min) ja saadab pidevalt päringuid.
 - Väljundpikkus forsitakse `ignore_eos`-iga; **suure väljundi puhul tõsta Timeout.**
 - Jooksu saab **Stop**-nupuga katkestada (viimased numbrid jäävad nähtavale).
 
+**Overload probe (+10%, vaikimisi sees):** jooksutab **10% üle concurrency limiidi** (nt 64 → 72), et
+kontrollida **admission control'i** — kas server lükkab üleliigsed päringud korrektselt tagasi (nagu
+OpenRouter / HuggingFace / hästi seadistatud vLLM), või võtab kõik vastu ja degradeerub vaikselt.
+Verdikt ütleb, kumb juhtus:
+- **✅ 429/503** üleliigsele → korrektne backpressure;
+- **⚠ tagasilükkamist pole, aga väljund kärbitud** → admission control puudub;
+- **❌ timeout'id / kõvad vead** → server puruneb ülekoormuse all.
+Tagasilükkamised (429/503) eristatakse "kõvadest" vigadest (timeout, connection, 500) tabelis eraldi.
+
 **Näide:** concurrency 64, sisend 4000 / väljund 500 tokenit (RAG-tüüpi), 30 min → näed nt
 "IN 136 M/h · OUT 7.6 M/h" ja kas see püsis 30 min jooksul.
 

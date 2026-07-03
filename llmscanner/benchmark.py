@@ -646,6 +646,22 @@ async def find_optima(client: LLMClient, model: Optional[str], *,
 #  Soak test — sustained load over a fixed duration → tokens/hour
 # --------------------------------------------------------------------------- #
 
+def _is_rejection(err: str) -> bool:
+    """A clean 'too much load' rejection (429/503/at-capacity) vs a hard failure
+    (timeout, connection error, 500). Distinguishes proper admission control
+    (server refuses the overflow) from a server that breaks under overload.
+
+    Matches the status via `client.generate`'s exact "HTTP {code}: ..." format
+    (so a stray number in the body can't be mistaken for a 429), plus a few
+    unambiguous rejection phrases.
+    """
+    e = (err or "").lower()
+    if "http 429" in e or "http 503" in e:
+        return True
+    return any(s in e for s in ("at capacity", "rate limit",
+                                "too many requests", "overloaded"))
+
+
 async def soak_test(client: LLMClient, model: Optional[str], *, concurrency: int,
                     ctx_tokens: int, gen_tokens: int, duration_s: float,
                     distinct_prefix: bool = True, force_output: bool = True,
@@ -701,6 +717,8 @@ async def soak_test(client: LLMClient, model: Optional[str], *, concurrency: int
         tin = sum(x[2] for x in ok)
         tout = sum(x[3] for x in ok)
         errs = [x[7] for x in recs if not x[1]]
+        rejected = sum(1 for e in errs if _is_rejection(e))   # clean 429/503 refusals
+        hard_err = len(errs) - rejected                        # timeouts / connection / 500
         in_tps = tin / el
         out_tps = tout / el
         tpots = [(x[5] - x[4]) / (x[3] - 1) for x in ok if x[3] > 1 and x[5] > x[4]]
@@ -730,6 +748,9 @@ async def soak_test(client: LLMClient, model: Optional[str], *, concurrency: int
             "lat_p95": _pct([x[5] for x in ok], 0.95),
             "est_frac": (sum(1 for x in ok if x[6]) / len(ok)) if ok else 0.0,
             "gen_actual": (tout / len(ok)) if ok else 0.0,
+            "rejected": rejected, "hard_err": hard_err,
+            "rejected_frac": (rejected / len(recs)) if recs else 0.0,
+            "hard_err_frac": (hard_err / len(recs)) if recs else 0.0,
             "error_samples": errs[:3],
             "series": series,
         }

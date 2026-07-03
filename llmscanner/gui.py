@@ -208,6 +208,14 @@ INFO = {
         "Give each request a unique preamble so a prefix-affinity gateway spreads the load "
         "across all backends (essential for a multi-machine cluster — otherwise it pins to "
         "one). Keep on unless you deliberately want single-backend numbers."),
+    "soak_overload": (
+        "Run at 10% ABOVE the Concurrency (e.g. 64 → 72) to test admission control: a good "
+        "gateway (OpenRouter, HuggingFace, a well-configured vLLM) rejects the overflow "
+        "cleanly with HTTP 429/503 while the rest succeed.\n\n"
+        "The result verdict tells you which happened:\n"
+        "• clean 429/503 for the excess → proper backpressure ✓\n"
+        "• no rejections but output truncated / degraded → no admission control ⚠\n"
+        "• timeouts / hard errors → the server breaks under overload ✗"),
     # ---- History ----
     "hist_filter": (
         "Type to filter the results list — matches host, model, test type and summary. "
@@ -1146,6 +1154,7 @@ class App:
         self.var_soak_out = tk.StringVar(value="500")
         self.var_soak_dur = tk.StringVar(value="30")
         self.var_soak_distinct = tk.BooleanVar(value=True)
+        self.var_soak_overload = tk.BooleanVar(value=True)
 
         sec, top = self._section(self.tab_soak, "Sustained throughput (tokens / hour)")
         sec.pack(fill="x", padx=12, pady=(10, 6))
@@ -1163,6 +1172,12 @@ class App:
         ctk.CTkCheckBox(fr, text="Distinct request prefixes (spread across backends)",
                         variable=self.var_soak_distinct).pack(side="left")
         self._info_icon(fr, "Distinct request prefixes", INFO["soak_distinct"]).pack(side="left", padx=(5, 0))
+        fr2 = ctk.CTkFrame(top, fg_color="transparent")
+        fr2.grid(row=3, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
+        ctk.CTkCheckBox(fr2, text="Overload probe (+10%) — push past the limit to check the "
+                                  "server rejects the excess cleanly",
+                        variable=self.var_soak_overload).pack(side="left")
+        self._info_icon(fr2, "Overload probe", INFO["soak_overload"]).pack(side="left", padx=(5, 0))
 
         runbar = ctk.CTkFrame(self.tab_soak, fg_color="transparent")
         runbar.pack(fill="x", padx=12, pady=4)
@@ -1214,8 +1229,12 @@ class App:
     def on_run_soak(self):
         try:
             target = resolve_target(self.var_host.get(), self.var_port.get())
+            base_conc = max(1, int(self.var_soak_conc.get()))
+            overload = bool(self.var_soak_overload.get())
+            # +10% concurrency (at least one extra request) to probe admission control.
+            eff_conc = max(base_conc + 1, round(base_conc * 1.1)) if overload else base_conc
             cfg = {
-                "concurrency": max(1, int(self.var_soak_conc.get())),
+                "base_conc": base_conc, "overload": overload, "concurrency": eff_conc,
                 "ctx_tokens": max(1, int(self.var_soak_in.get())),
                 "gen_tokens": max(1, int(self.var_soak_out.get())),
                 "duration_s": max(1.0, float(self.var_soak_dur.get()) * 60.0),
@@ -1226,6 +1245,8 @@ class App:
             return self._error(ValueError(f"Invalid number: {e}"))
 
         self._soak_target_out = cfg["gen_tokens"]
+        self._soak_base_conc = cfg["base_conc"]
+        self._soak_overload = cfg["overload"]
         client = LLMClient.from_target(
             target, api_key=self.var_apikey.get().strip() or "EMPTY",
             timeout=cfg["timeout"], endpoint=self.var_endpoint.get())
@@ -1233,10 +1254,12 @@ class App:
         self.soak_chart.clear()
         self.soak_log.clear()
         mins = cfg["duration_s"] / 60.0
+        cdesc = (f"c={cfg['concurrency']} (base {cfg['base_conc']} +10% overload probe)"
+                 if cfg["overload"] else f"c={cfg['concurrency']}")
         self.soak_log.write(f"▶ Soak · {client.base_url}", "head")
-        self.soak_log.write(f"        c={cfg['concurrency']} · in {cfg['ctx_tokens']} / "
+        self.soak_log.write(f"        {cdesc} · in {cfg['ctx_tokens']} / "
                             f"out {cfg['gen_tokens']} tok · {mins:g} min", "dim")
-        self.soak_readout.configure(text=f"Starting… c={cfg['concurrency']}, "
+        self.soak_readout.configure(text=f"Starting… {cdesc}, "
                                          f"{cfg['ctx_tokens']}/{cfg['gen_tokens']} tok, {mins:g} min")
 
         def on_progress(snap):
@@ -1249,6 +1272,21 @@ class App:
                         distinct_prefix=cfg["distinct_prefix"], on_progress=on_progress),
             self._soak_done, status="Soak test running…")
 
+    @staticmethod
+    def _soak_verdict(s: dict, target_out: int) -> str:
+        """Admission-control assessment for the overload probe."""
+        degraded = (s["gen_actual"] < 0.7 * max(1, target_out)) or s["est_frac"] >= 0.3
+        if s["hard_err_frac"] >= 0.05:
+            return ("❌ breaks under overload — hard errors/timeouts "
+                    f"({s['hard_err_frac'] * 100:.0f}%), not clean rejections")
+        if s["rejected_frac"] >= 0.02:
+            return (f"✅ admission control OK — excess rejected cleanly (429/503) "
+                    f"{s['rejected_frac'] * 100:.0f}% of requests")
+        if degraded:
+            return ("⚠ no admission control — accepted the overload and degraded "
+                    "(truncated output) instead of rejecting")
+        return "✓ absorbed +10% with no rejects and no degradation (headroom above the limit)"
+
     def _soak_readout_text(self, s: dict) -> str:
         warn = ""
         target_out = getattr(self, "_soak_target_out", 1)
@@ -1258,7 +1296,8 @@ class App:
             warn += "  ⚠ est-tokens"
         return (
             f"⏱ {self._fmt_hms(s['elapsed'])} / {self._fmt_hms(s['duration'])}   "
-            f"({s['success']} ok, {s['errors']} failed · {s['req_per_s']:.1f} req/s)\n"
+            f"({s['success']} ok · {s['rejected']} rejected(429) · {s['hard_err']} errored "
+            f"· {s['req_per_s']:.1f} req/s)\n"
             f"IN    {s['in_tps']:>10,.0f} tok/s   →   {self._fmt_per_hour(s['in_per_hour'])}\n"
             f"OUT   {s['out_tps']:>10,.0f} tok/s   →   {self._fmt_per_hour(s['out_per_hour'])}\n"
             f"TOTAL {s['total_tps']:>10,.0f} tok/s   →   {self._fmt_per_hour(s['total_per_hour'])}"
@@ -1290,7 +1329,14 @@ class App:
              ("TPOT (ms)", f"{s['tpot_ms']:.1f}" if s['tpot_ms'] > 0 else "–"),
              ("latency p50 / p95 (s)", f"{s['lat_p50']:.2f} / {s['lat_p95']:.2f}"),
              ("mean output tok/req", f"{s['gen_actual']:.0f} / {getattr(self, '_soak_target_out', '?')}"),
+             ("rejected (429/503)", f"{s['rejected']} ({s['rejected_frac'] * 100:.1f}%)"),
+             ("hard errors", f"{s['hard_err']} ({s['hard_err_frac'] * 100:.1f}%)"),
              ("est tokens", f"{s['est_frac'] * 100:.0f}%")])
+        if getattr(self, "_soak_overload", False):
+            verdict = self._soak_verdict(s, getattr(self, "_soak_target_out", 1))
+            base = getattr(self, "_soak_base_conc", "?")
+            self.soak_log.write(f"Overload probe (base {base} +10% → c={s['concurrency']}): {verdict}",
+                                "ok" if verdict.startswith(("✅", "✓")) else "err")
         for e in s.get("error_samples", []):
             self.soak_log.write(f"   error: {e[:70]}", "err")
         self._set_status("Soak test complete.")
