@@ -76,7 +76,7 @@ class LLMClient:
         return None
 
     def _payload(self, model, prompt, max_tokens, temperature, system, include_usage,
-                 force_output=False):
+                 force_output=False, stop=None, top_p=None, seed=None):
         if self.endpoint == "completions":
             url = f"{self.base_url}/v1/completions"
             payload = {
@@ -99,6 +99,15 @@ class LLMClient:
                 "temperature": temperature,
                 "stream": True,
             }
+        # Optional sampling / stopping controls — used by the provider-readiness
+        # contract probes to verify the server honours them. Omitted when unset so
+        # the throughput paths send exactly the same body they always have.
+        if stop:
+            payload["stop"] = stop
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if seed is not None:
+            payload["seed"] = seed
         if force_output:
             # Force exactly `max_tokens` of decoding: ignore an early end-of-text
             # and require the full length. Without this a model often stops after
@@ -114,11 +123,14 @@ class LLMClient:
 
     async def generate(self, *, model: str, prompt: str, max_tokens: int = 128,
                        temperature: float = 0.0, system: Optional[str] = None,
-                       force_output: bool = False) -> RequestResult:
+                       force_output: bool = False, stop=None, top_p: Optional[float] = None,
+                       seed: Optional[int] = None) -> RequestResult:
         """Stream one completion and return timing/throughput metrics.
 
         `force_output` requests exactly `max_tokens` of output (ignore_eos /
         min_tokens) so throughput is measured on a fixed decode length.
+        `stop` / `top_p` / `seed` are passed straight through when set (used by
+        the provider-readiness contract checks).
         """
         # Attempts in order; on a retriable 400/422 we drop the fields most likely
         # to be unsupported — first stream_options, then ignore_eos/min_tokens.
@@ -131,6 +143,7 @@ class LLMClient:
                     model=model, prompt=prompt, max_tokens=max_tokens,
                     temperature=temperature, system=system,
                     include_usage=iu, force_output=fo,
+                    stop=stop, top_p=top_p, seed=seed,
                 )
             except httpx.HTTPStatusError as e:
                 code = e.response.status_code
@@ -152,13 +165,16 @@ class LLMClient:
         return RequestResult(ok=False, error="unreachable")
 
     async def _stream_once(self, *, model, prompt, max_tokens, temperature,
-                           system, include_usage, force_output=False) -> RequestResult:
+                           system, include_usage, force_output=False,
+                           stop=None, top_p=None, seed=None) -> RequestResult:
         url, payload = self._payload(model, prompt, max_tokens, temperature, system,
-                                     include_usage, force_output=force_output)
+                                     include_usage, force_output=force_output,
+                                     stop=stop, top_p=top_p, seed=seed)
         start = time.perf_counter()
         first: Optional[float] = None
         chunks = 0
         usage = None
+        finish_reason = ""
         parts: list[str] = []
 
         # Ask explicitly for an SSE stream — some gateways only stream token-by-token
@@ -181,6 +197,8 @@ class LLMClient:
                     usage = obj.get("usage") or None
                     for ch in (obj.get("choices") or []):
                         piece = (ch.get("message") or {}).get("content") or ch.get("text") or ""
+                        if ch.get("finish_reason"):
+                            finish_reason = ch["finish_reason"]
                         if piece:
                             parts.append(piece)
                     # leave chunks=0 / first=None → handled as a non-streamed result below
@@ -201,6 +219,8 @@ class LLMClient:
                         if not choices:
                             continue
                         ch = choices[0]
+                        if ch.get("finish_reason"):
+                            finish_reason = ch["finish_reason"]
                         if "delta" in ch:
                             piece = (ch.get("delta") or {}).get("content") or ""
                         else:
@@ -241,4 +261,5 @@ class LLMClient:
             output_tps=output_tps,
             text=text,
             est_tokens=est_tokens,
+            finish_reason=finish_reason,
         )

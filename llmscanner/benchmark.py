@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import math
 import random
 import re
 import statistics
@@ -646,6 +648,53 @@ async def find_optima(client: LLMClient, model: Optional[str], *,
 #  Soak test — sustained load over a fixed duration → tokens/hour
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+#  TheEye — a real production workload mix (per-task call rate + in/out sizes)
+# --------------------------------------------------------------------------- #
+
+# (task, calls_per_30min, (in mean, in p95, in max), (out mean, out p95, out max))
+THEEYE_TASKS = [
+    ("classification",          108842, (1159, 3323, 11906), (117, 145, 2048)),
+    ("social_image_understand", 103973, (1266, 3401, 16495), (135, 215, 517)),
+    ("extraction",               77051, (3608, 6609, 12633), (809, 1954, 8192)),
+    ("causal_relevance",         42063, (265, 290, 366),      (42, 60, 512)),
+    ("signal_relevance_batch",   42047, (2245, 2744, 3432),   (239, 789, 4096)),
+    ("nvc_analysis",             41966, (4030, 4296, 5519),   (398, 913, 5000)),
+    ("delphi",                   45000, (1350, 1700, 2100),   (435, 780, 2500)),
+    ("extraction_entity",        11198, (2817, 6393, 11136),  (693, 2904, 4096)),
+    ("extraction_semantic",      11125, (3688, 7344, 12008),  (214, 533, 8192)),
+    ("entity_profile_full",       5947, (2752, 4486, 6169),   (1249, 1717, 3018)),
+    ("entity_update",             2638, (4877, 6147, 7505),   (1544, 2293, 5000)),
+]
+_THEEYE_WEIGHTS = [t[1] for t in THEEYE_TASKS]
+
+
+def _lognorm_sample(mean: float, p95: float, hard_max: float) -> int:
+    """Draw a token count from a lognormal fit to (mean, p95), clamped to hard_max.
+
+    Token-length distributions are right-skewed, so a lognormal reproduces the
+    long tail far better than a normal. sigma/mu are solved from the mean and
+    p95 (z=1.6449); the quadratic is clamped so an extreme p95/mean ratio can't
+    blow up.
+    """
+    mean = max(1.0, float(mean))
+    p95 = max(mean, float(p95))
+    r = math.log(p95 / mean)                 # >= 0
+    disc = 1.6449 ** 2 - 2.0 * r
+    sigma = 1.6449 if disc <= 0 else 1.6449 - math.sqrt(disc)
+    sigma = min(max(sigma, 0.01), 2.0)
+    mu = math.log(mean) - sigma * sigma / 2.0
+    v = math.exp(mu + sigma * random.gauss(0.0, 1.0))
+    return int(min(max(1, round(v)), hard_max))
+
+
+def theeye_sample() -> tuple:
+    """Sample one (input_tokens, output_tokens) request from the TheEye mix —
+    weighted by each task's call rate, sized from its in/out distribution."""
+    _n, _w, (im, ip, ix), (om, op, ox) = random.choices(THEEYE_TASKS, weights=_THEEYE_WEIGHTS, k=1)[0]
+    return _lognorm_sample(im, ip, ix), _lognorm_sample(om, op, ox)
+
+
 def _is_rejection(err: str) -> bool:
     """A clean 'too much load' rejection (429/503/at-capacity) vs a hard failure
     (timeout, connection error, 500). Distinguishes proper admission control
@@ -666,6 +715,7 @@ async def soak_test(client: LLMClient, model: Optional[str], *, concurrency: int
                     ctx_tokens: int, gen_tokens: int, duration_s: float,
                     distinct_prefix: bool = True, force_output: bool = True,
                     report_interval: float = 5.0,
+                    sampler: Optional[Callable[[], tuple]] = None,
                     on_progress: Optional[Callable[[dict], None]] = None) -> dict:
     """Hold `concurrency` requests in flight for `duration_s` seconds and measure
     the SUSTAINED input/output token rate — i.e. tokens per hour the server (and
@@ -689,23 +739,27 @@ async def soak_test(client: LLMClient, model: Optional[str], *, concurrency: int
     start = time.perf_counter()
     deadline = start + max(1.0, duration_s)
     # Lightweight per-request records (no generated text kept, so a long run
-    # doesn't balloon memory): (t_rel, ok, ptoks, ctoks, ttft, total_time, est, err)
+    # doesn't balloon memory):
+    #   (t_rel, ok, ptoks, ctoks, ttft, total_time, est, err, req_out)
     recs: list[tuple] = []
 
-    def build_body() -> str:
+    def build_body(in_tokens: int) -> str:
         salt = (_unique_prefix(salt_tokens) + "\n") if distinct_prefix else ""
-        budget = max(1, ctx_tokens - (salt_tokens if distinct_prefix else 0))
+        budget = max(1, in_tokens - (salt_tokens if distinct_prefix else 0))
         return (salt + _filler(budget, lead=random.randint(0, 10 ** 9)) +
                 "\n\nUsing the text above as context, write a long, detailed "
                 "continuation. Keep writing and do not stop.")
 
     async def worker():
         while time.perf_counter() < deadline:
-            r = await client.generate(model=model, prompt=build_body(),
-                                      max_tokens=gen_tokens, force_output=force_output)
+            # A sampler (e.g. the TheEye workload mix) picks a realistic (in, out)
+            # size per request; otherwise every request is the fixed configured size.
+            in_toks, out_toks = sampler() if sampler else (ctx_tokens, gen_tokens)
+            r = await client.generate(model=model, prompt=build_body(in_toks),
+                                      max_tokens=out_toks, force_output=force_output)
             recs.append((time.perf_counter() - start, r.ok, r.prompt_tokens,
                          r.completion_tokens, r.ttft, r.total_time, r.est_tokens,
-                         "" if r.ok else r.error))
+                         "" if r.ok else r.error, out_toks))
             if not r.ok:
                 # Back off on failure so a down / at-capacity server isn't hammered
                 # in a tight loop (which would also grow `recs` without bound).
@@ -730,8 +784,21 @@ async def soak_test(client: LLMClient, model: Optional[str], *, concurrency: int
             m = int(x[0] // 60)
             b = buckets.setdefault(m, [0, 0])
             b[0] += x[3]; b[1] += x[2]
+        ms = sorted(buckets)
+        # Fold a short partial trailing minute into the one before it. When the run
+        # ends, workers stop launching at the deadline but the whole in-flight batch
+        # (~concurrency requests) drains within a narrow final window; dividing that
+        # full batch of tokens by only a second or two would spike the last point to
+        # the ceiling. Merging keeps the tokens but under a sane 60 s divisor, so the
+        # final plotted point reflects steady state instead of a draining artifact.
+        if len(ms) >= 2 and (el - ms[-1] * 60.0) < 30.0:
+            last, prev = ms[-1], ms[-2]
+            buckets[prev][0] += buckets[last][0]
+            buckets[prev][1] += buckets[last][1]
+            del buckets[last]
+            ms = ms[:-1]
         series = []
-        for m in sorted(buckets):
+        for m in ms:
             secs = max(min(60.0, el - m * 60.0), 1e-9)
             series.append((m, buckets[m][0] / secs, buckets[m][1] / secs))
         return {
@@ -748,6 +815,11 @@ async def soak_test(client: LLMClient, model: Optional[str], *, concurrency: int
             "lat_p95": _pct([x[5] for x in ok], 0.95),
             "est_frac": (sum(1 for x in ok if x[6]) / len(ok)) if ok else 0.0,
             "gen_actual": (tout / len(ok)) if ok else 0.0,
+            "req_out_mean": (sum(x[8] for x in ok) / len(ok)) if ok else 0.0,
+            # per-request under-generation: server delivered < half the requested
+            # output (truncation), works for both fixed and mixed (sampled) sizes
+            "undergen_frac": (sum(1 for x in ok if x[8] >= 8 and x[3] < 0.5 * x[8]) / len(ok))
+                             if ok else 0.0,
             "rejected": rejected, "hard_err": hard_err,
             "rejected_frac": (rejected / len(recs)) if recs else 0.0,
             "hard_err_frac": (hard_err / len(recs)) if recs else 0.0,
@@ -768,3 +840,639 @@ async def soak_test(client: LLMClient, model: Optional[str], *, concurrency: int
     finally:
         rep.cancel()
     return snapshot()
+
+
+# ---------------------------------------------------------------------------
+# Model-fit suitability probe (Openclaw / Hermes)
+#
+# Instead of raw throughput, this scores whether a model can actually do the
+# things an agentic caller needs: emit valid Hermes-style tool calls, pick the
+# right tool with the right arguments, NOT call a tool when it shouldn't, return
+# strict JSON, and follow tight formatting instructions. Each dimension yields a
+# 0..1 score; a weighted blend plus hard gates give a SOBIB / PIIRIPEAL / EI SOBI
+# verdict. Deterministic (temperature 0) so re-runs are comparable.
+# ---------------------------------------------------------------------------
+
+_HERMES_SYSTEM = (
+    "You are a function calling AI model. You are provided with function signatures "
+    "within <tools></tools> XML tags. You may call one or more functions to assist "
+    "with the user query. Don't make assumptions about what values to plug into "
+    "functions; if the user query does not require a tool, just answer normally. "
+    "Here are the available tools:\n<tools>\n"
+    '{"type":"function","function":{"name":"get_weather","description":"Get the current weather for a city","parameters":{"type":"object","properties":{"city":{"type":"string"},"unit":{"type":"string","enum":["celsius","fahrenheit"]}},"required":["city"]}}}\n'
+    '{"type":"function","function":{"name":"web_search","description":"Search the web for up-to-date information","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}}\n'
+    '{"type":"function","function":{"name":"calculator","description":"Evaluate an arithmetic expression","parameters":{"type":"object","properties":{"expression":{"type":"string"}},"required":["expression"]}}}\n'
+    '{"type":"function","function":{"name":"send_email","description":"Send an email to a recipient","parameters":{"type":"object","properties":{"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"}},"required":["to","subject","body"]}}}\n'
+    "</tools>\n"
+    "For each function call return a json object with function name and arguments "
+    "within <tool_call></tool_call> XML tags as follows:\n"
+    '<tool_call>\n{"name": <function-name>, "arguments": <args-dict>}\n</tool_call>'
+)
+
+# tool=None → the model should answer directly and NOT call a tool.
+_TOOL_CASES = [
+    {"user": "What's the weather in Tallinn right now? Use celsius.",
+     "tool": "get_weather", "args": {"city": "tallinn", "unit": "celsius"}},
+    {"user": "How warm is it in Tokyo at the moment, in fahrenheit?",
+     "tool": "get_weather", "args": {"city": "tokyo", "unit": "fahrenheit"}},
+    {"user": "Search the web for the latest news about the Estonian economy.",
+     "tool": "web_search", "args": {"query": "eston"}},
+    {"user": "Look online for information about the James Webb Space Telescope.",
+     "tool": "web_search", "args": {"query": "webb"}},
+    {"user": "What is 2348 multiplied by 19?",
+     "tool": "calculator", "args": {"expression": ["2348", "19"]}},
+    {"user": "Please compute 145 + 998 - 37.",
+     "tool": "calculator", "args": {"expression": ["145", "998", "37"]}},
+    {"user": "Send an email to john@example.com with the subject Lunch asking if "
+             "he is free at noon tomorrow.",
+     "tool": "send_email", "args": {"to": "john@example.com", "subject": "lunch"}},
+    {"user": "Hi there! Can you briefly introduce yourself in one sentence?", "tool": None},
+    {"user": "Write a short two-line poem about the sea.", "tool": None},
+    {"user": "What does the word 'ephemeral' mean?", "tool": None},
+]
+
+_JSON_SYSTEM = ("You output only raw JSON that satisfies the request. No prose, no "
+                "explanation, no markdown, no code fences — just the JSON value.")
+
+_JSON_CASES = [
+    {"user": "Give a JSON object describing a fictional person with keys: name "
+             "(string), age (integer), hobbies (array of strings).",
+     "keys": {"name": str, "age": int, "hobbies": list}},
+    {"user": "Return a JSON object with keys city (string), population (integer) and "
+             "country (string) for a made-up town.",
+     "keys": {"city": str, "population": int, "country": str}},
+    {"user": "Output a JSON array of exactly three integers.",
+     "array_of": int, "length": 3},
+    {"user": 'Return a JSON object with keys "ok" (boolean true) and "items" (an '
+             "array of three short strings).",
+     "keys": {"ok": bool, "items": list}},
+]
+
+_INSTRUCT_SYSTEM = "You are a helpful assistant. Follow the user's formatting instructions exactly."
+
+_INSTRUCT_CASES = [
+    {"user": "Reply with exactly the single word READY and nothing else.",
+     "check": lambda t: t.strip().strip(".").upper() == "READY"},
+    {"user": "List three primary colours, one per line, with no numbering, bullets "
+             "or any other text.",
+     "check": lambda t: len([ln for ln in t.strip().splitlines() if ln.strip()]) == 3},
+    {"user": "Answer in exactly one word: what is the capital of France?",
+     "check": lambda t: len(t.strip().split()) == 1 and "paris" in t.lower()},
+    {"user": "Respond with only the number 42 and nothing else.",
+     "check": lambda t: t.strip().strip(".") == "42"},
+]
+
+# Reasoning / scaffolding that leaked into the visible answer — an agentic caller
+# parses the raw output, so leaked chain-of-thought breaks it.
+_LEAK_RE = re.compile(r"</?think>|<\|.*?\|>|^\s*(okay|let me|the user|i need to|first,)",
+                      re.IGNORECASE | re.MULTILINE)
+
+# Capture the payload between the tags (not up to the first brace) so nested
+# argument objects survive; the closing tag, not a brace, is the delimiter.
+_TOOLCALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+
+
+def _extract_tool_calls(text: str) -> list:
+    """Pull (name, arguments) pairs out of a Hermes-style response.
+
+    Accepts the canonical <tool_call>{...}</tool_call> wrapper and, as a
+    fallback, a bare top-level JSON object carrying name/arguments (some models
+    drop the tags). Returns [] when nothing parseable is present.
+    """
+    calls = []
+    blocks = _TOOLCALL_RE.findall(text or "")
+    if not blocks:
+        # Fallback: a lone JSON object with name+arguments and no wrapper tags.
+        m = re.search(r'\{[^{}]*"name"\s*:.*\}', text or "", re.DOTALL)
+        if m:
+            blocks = [m.group(0)]
+    for b in blocks:
+        try:
+            obj = json.loads(b)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and "name" in obj:
+            calls.append((str(obj.get("name")),
+                          obj.get("arguments") or obj.get("parameters") or {}))
+    return calls
+
+
+def _arg_ok(args: dict, expected: dict) -> bool:
+    """Every expected arg's substring(s) appear in the serialised arguments."""
+    blob = json.dumps(args, ensure_ascii=False).lower() if isinstance(args, dict) else str(args).lower()
+    for _k, want in expected.items():
+        needles = want if isinstance(want, list) else [want]
+        if not all(str(n).lower() in blob for n in needles):
+            return False
+    return True
+
+
+def _strip_fences(text: str) -> str:
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z]*\s*", "", t)
+        t = re.sub(r"\s*```$", "", t)
+    return t.strip()
+
+
+async def suitability_test(client: LLMClient, model: Optional[str], *,
+                           dims: Optional[list] = None,
+                           on_progress: Optional[Callable[[dict], None]] = None) -> dict:
+    """Score a model's fit for agentic use (Hermes tool-calling + JSON + format).
+
+    `dims` selects which of "tool" / "json" / "instruct" / "latency" to run
+    (default: all four). Streams per-case results via `on_progress(event)` and
+    returns a report dict with per-dimension scores and an overall verdict.
+    Naturally cancellable — cancelling the task raises at the next await.
+    """
+    dims = dims or ["tool", "json", "instruct", "latency"]
+    if not model:
+        try:
+            models = await client.list_models()
+            model = models[0] if models else None
+        except Exception:
+            model = None
+        if not model:
+            raise RuntimeError("No model specified and model listing failed.")
+
+    def emit(evt: dict):
+        if on_progress:
+            on_progress(evt)
+
+    lat_samples: list = []       # (total_time, output_tps) across every probe
+    cases_out: list = []         # flat per-case log for the results table
+
+    async def ask(system, user, max_tokens):
+        r = await client.generate(model=model, prompt=user, system=system,
+                                  max_tokens=max_tokens, temperature=0.0)
+        if r.ok and r.total_time > 0:
+            lat_samples.append((r.total_time, r.output_tps))
+        return r
+
+    report: dict = {"model": model, "dims": list(dims)}
+
+    # ---- Dimension: Hermes tool-calling --------------------------------------
+    if "tool" in dims:
+        pos = [c for c in _TOOL_CASES if c["tool"]]
+        neg = [c for c in _TOOL_CASES if not c["tool"]]
+        valid = select = args_ok = false_call = 0
+        for c in _TOOL_CASES:
+            r = await ask(_HERMES_SYSTEM, c["user"], 512)
+            calls = _extract_tool_calls(r.text) if r.ok else []
+            if c["tool"]:
+                got = calls[0][0] if calls else None
+                got_args = calls[0][1] if calls else {}
+                v = bool(calls)
+                s = v and got == c["tool"]
+                a = s and _arg_ok(got_args, c["args"])
+                valid += v; select += s; args_ok += a
+                ok = a
+                detail = (f"→ {got or '∅'}" if not a else f"✓ {got} {got_args}")
+            else:
+                fc = bool(calls)
+                false_call += fc
+                ok = not fc
+                detail = "answered directly" if ok else f"✗ spurious {calls[0][0]}"
+            cases_out.append(("tool", c["user"], ok, detail))
+            emit({"event": "case", "dim": "tool", "user": c["user"], "ok": ok, "detail": detail})
+        npos, nneg = max(1, len(pos)), max(1, len(neg))
+        report["tool"] = {
+            "valid_rate": valid / npos, "select_rate": select / npos,
+            "arg_rate": args_ok / npos, "falsecall_rate": false_call / nneg,
+            "n_pos": len(pos), "n_neg": len(neg),
+        }
+        emit({"event": "dim_done", "dim": "tool", "score": _tool_score(report["tool"])})
+
+    # ---- Dimension: strict JSON output ---------------------------------------
+    if "json" in dims:
+        parse_ok = schema_ok = 0
+        for c in _JSON_CASES:
+            r = await ask(_JSON_SYSTEM, c["user"], 384)
+            obj = None
+            if r.ok:
+                try:
+                    obj = json.loads(_strip_fences(r.text))
+                except Exception:
+                    obj = None
+            p = obj is not None
+            s = p and _json_schema_ok(obj, c)
+            parse_ok += p; schema_ok += s
+            detail = "schema ok" if s else ("parsed, schema off" if p else "not valid JSON")
+            cases_out.append(("json", c["user"], s, detail))
+            emit({"event": "case", "dim": "json", "user": c["user"], "ok": s, "detail": detail})
+        n = max(1, len(_JSON_CASES))
+        report["json"] = {"parse_rate": parse_ok / n, "schema_rate": schema_ok / n}
+        # Stream the same blended score that ends up in report["scores"], so the
+        # live per-dimension number matches the final scorecard.
+        emit({"event": "dim_done", "dim": "json",
+              "score": 0.5 * report["json"]["parse_rate"] + 0.5 * report["json"]["schema_rate"]})
+
+    # ---- Dimension: instruction following / format discipline ----------------
+    if "instruct" in dims:
+        follow = leak = 0
+        for c in _INSTRUCT_CASES:
+            r = await ask(_INSTRUCT_SYSTEM, c["user"], 96)
+            f = bool(r.ok and c["check"](r.text))
+            lk = bool(r.ok and _LEAK_RE.search(r.text))
+            follow += f; leak += lk
+            detail = "followed" if f else f"deviated: {(r.text or '').strip()[:40]!r}"
+            cases_out.append(("instruct", c["user"], f, detail))
+            emit({"event": "case", "dim": "instruct", "user": c["user"], "ok": f, "detail": detail})
+        n = max(1, len(_INSTRUCT_CASES))
+        report["instruct"] = {"follow_rate": follow / n, "leak_rate": leak / n}
+        emit({"event": "dim_done", "dim": "instruct",
+              "score": max(0.0, report["instruct"]["follow_rate"]
+                           - 0.5 * report["instruct"]["leak_rate"])})
+
+    # ---- Latency (measured across every probe above) -------------------------
+    if lat_samples:
+        lats = sorted(t for t, _ in lat_samples)
+        report["latency"] = {
+            "mean_s": statistics.mean(lats),
+            "p95_s": _pct(lats, 0.95),
+            "mean_out_tps": statistics.mean([o for _, o in lat_samples if o] or [0.0]),
+            "n": len(lat_samples),
+        }
+
+    report["cases"] = cases_out
+    report["scores"] = _suitability_scores(report)
+    report["overall"], report["verdict"] = _suitability_verdict(report)
+    emit({"event": "done", "report": report})
+    return report
+
+
+def _tool_score(t: dict) -> float:
+    # Reward valid+correct+args, penalise spurious calls; weighted to correctness.
+    return max(0.0, 0.30 * t["valid_rate"] + 0.30 * t["select_rate"]
+               + 0.25 * t["arg_rate"] + 0.15 * (1.0 - t["falsecall_rate"]))
+
+
+def _json_schema_ok(obj, case: dict) -> bool:
+    if "keys" in case:
+        if not isinstance(obj, dict):
+            return False
+        for k, typ in case["keys"].items():
+            if k not in obj:
+                return False
+            v = obj[k]
+            if typ is int and isinstance(v, bool):   # bool is a subclass of int
+                return False
+            if not isinstance(v, typ):
+                return False
+        return True
+    if "array_of" in case:
+        if not isinstance(obj, list):
+            return False
+        if "length" in case and len(obj) != case["length"]:
+            return False
+        return all(isinstance(x, case["array_of"]) and not isinstance(x, bool) for x in obj)
+    return False
+
+
+def _suitability_scores(report: dict) -> dict:
+    out = {}
+    if "tool" in report:
+        out["tool"] = _tool_score(report["tool"])
+    if "json" in report:
+        out["json"] = 0.5 * report["json"]["parse_rate"] + 0.5 * report["json"]["schema_rate"]
+    if "instruct" in report:
+        out["instruct"] = max(0.0, report["instruct"]["follow_rate"]
+                              - 0.5 * report["instruct"]["leak_rate"])
+    return out
+
+
+def _suitability_verdict(report: dict) -> tuple:
+    scores = report["scores"]
+    weights = {"tool": 0.5, "json": 0.25, "instruct": 0.25}
+    wsum = sum(weights[k] for k in scores) or 1.0
+    overall = sum(scores[k] * weights[k] for k in scores) / wsum
+    # Hard gate: if tool-calling is fundamentally broken, it can't be agentic-fit
+    # no matter how clean its prose JSON is.
+    if "tool" in report and report["tool"]["valid_rate"] < 0.5:
+        return overall, "❌ EI SOBI — ei suuda usaldusväärselt tööriistu kutsuda (Hermes)"
+    if overall >= 0.85:
+        return overall, "✅ SOBIB — täidab agentse kasutuse nõuded"
+    if overall >= 0.6:
+        return overall, "⚠ PIIRIPEAL — kasutatav, aga esineb vigu; kontrolli nõrku dimensioone"
+    return overall, "❌ EI SOBI — liiga palju vigu agentseks kasutuseks"
+
+
+# ---------------------------------------------------------------------------
+# Provider readiness (OpenRouter / HuggingFace) + bottleneck analysis
+#
+# Answers "could this backend serve real router/inference-provider traffic, and
+# where does it break first?". Two phases:
+#   1. API-contract compliance — the hard requirements a provider imposes
+#      (streaming, usage accounting, max_tokens/stop honouring, deterministic
+#      greedy decode, sampling params applied, concurrent correctness, clean 4xx
+#      errors). Each is a single pass/fail probe mapped to the requirement.
+#   2. Concurrency sweep — replay increasingly parallel load at a realistic
+#      request shape, measure output tok/s, TTFT p95, TPOT and the 429-vs-hard
+#      error split at each level, then classify the dominant bottleneck (queue/
+#      prefill-bound, decode-bound, no batching, admission control, or breaks).
+# A weighted gate over both phases yields a SOBIB/PIIRIPEAL/EI SOBI verdict for
+# OpenRouter and for HuggingFace, whose emphases differ (usage/billing & TTFT vs
+# throughput/batching).
+# ---------------------------------------------------------------------------
+
+def _classify_load_errors(errors: list) -> tuple:
+    """Split a load run's error strings into clean rejections vs hard failures."""
+    rej = sum(1 for e in errors if _is_rejection(e))
+    return rej, len(errors) - rej
+
+
+async def _readiness_compliance(client: LLMClient, model: str,
+                                emit: Callable[[dict], None]) -> list:
+    """Run the API-contract probes; return a list of {name, ok, detail, req}."""
+    checks: list = []
+
+    def add(name, ok, detail, req):
+        row = {"name": name, "ok": bool(ok), "detail": str(detail)[:80], "req": req}
+        checks.append(row)
+        emit({"event": "check", **row})
+
+    async def one(prompt, max_tokens, **kw):
+        return await client.generate(model=model, prompt=prompt, max_tokens=max_tokens, **kw)
+
+    # 1. Basic chat completion.
+    r = await one("Reply with the single word: pong.", 16, temperature=0.0)
+    add("Chat endpoint", r.ok and bool((r.text or "").strip()),
+        (r.text or "").strip()[:40] if r.ok else r.error,
+        "OpenAI /v1/chat/completions returns a completion")
+
+    # 2 + 3. Streaming and usage accounting (one longer request tells us both).
+    r = await one(LONG_PROMPT, 48, temperature=0.0)
+    streamed = bool(r.ok and r.completion_tokens > 3 and r.ttft < r.total_time - 1e-3)
+    add("Streaming (SSE)", streamed,
+        (f"TTFT {r.ttft * 1000:.0f}ms of {r.total_time * 1000:.0f}ms total"
+         if r.ok else r.error) if streamed else "response not streamed token-by-token",
+        "stream:true delivers tokens incrementally")
+    add("Usage accounting", r.ok and not r.est_tokens,
+        "server returned prompt/completion token counts" if (r.ok and not r.est_tokens)
+        else "no usage block — counts estimated",
+        "usage in final SSE chunk (routers bill on it)")
+
+    # 4 + 5. max_tokens honoured and finish_reason on truncation.
+    cap = 16
+    r = await one(LONG_PROMPT, cap, temperature=0.0)
+    respected = bool(r.ok and 0 < r.completion_tokens <= cap + 8)
+    add("max_tokens honored", respected,
+        f"{r.completion_tokens} tokens for max_tokens={cap}" if r.ok else r.error,
+        "generation stops at max_tokens")
+    add("finish_reason=length", bool(r.ok and r.finish_reason == "length"),
+        f"finish_reason={r.finish_reason or '∅'}" if r.ok else r.error,
+        "correct finish_reason when truncated")
+
+    # 6. Stop sequences.
+    r = await one("Output exactly these words separated by single spaces and nothing "
+                  "else: alpha bravo charlie delta echo", 48, temperature=0.0,
+                  stop=["charlie"])
+    txt = (r.text or "").lower()
+    stop_ok = bool(r.ok and "alpha" in txt and "delta" not in txt and "echo" not in txt)
+    add("Stop sequences", stop_ok,
+        (repr((r.text or "").strip()[:40]) if r.ok else r.error) if not stop_ok
+        else "cut off at the stop token",
+        "honors the stop parameter")
+
+    # 7. Determinism at temperature 0 (greedy decode should be reproducible).
+    a = await one("Name three colours, comma separated, lowercase.", 24, temperature=0.0)
+    b = await one("Name three colours, comma separated, lowercase.", 24, temperature=0.0)
+    det = bool(a.ok and b.ok and (a.text or "").strip()[:60] == (b.text or "").strip()[:60])
+    add("Deterministic (temp 0)", det,
+        "identical output on repeat" if det else "temp-0 output varied between calls",
+        "reproducible greedy decoding")
+
+    # 8. Sampling params actually take effect.
+    a = await one("Write one short sentence about the sea.", 32, temperature=1.0,
+                  top_p=0.95, seed=1)
+    b = await one("Write one short sentence about the sea.", 32, temperature=1.0,
+                  top_p=0.95, seed=2)
+    varies = bool(a.ok and b.ok and (a.text or "").strip() != (b.text or "").strip())
+    add("Sampling params applied", varies,
+        "temperature/seed produce varied output" if varies
+        else "identical output despite temp/seed change",
+        "honors temperature / top_p / seed")
+
+    # 9. Concurrent correctness — a small parallel burst all succeeds.
+    burst = await asyncio.gather(
+        *(one(f"[{i}] Reply with the single word OK.", 8, temperature=0.0) for i in range(8)))
+    nok = sum(1 for x in burst if x.ok)
+    add("Concurrent requests", nok == len(burst),
+        f"{nok}/{len(burst)} parallel requests ok",
+        "handles simultaneous requests correctly")
+
+    # 10. Clean error on an invalid request (rather than a 5xx or a hang).
+    r = await client.generate(model="__llmscanner_nonexistent_model__",
+                              prompt="hi", max_tokens=8)
+    clean = bool((not r.ok) and r.error.startswith("HTTP 4"))
+    add("Clean error on bad request", clean,
+        (r.error[:60] if not r.ok else "accepted an invalid model — no validation"),
+        "returns a 4xx JSON error, not 5xx / timeout")
+
+    emit({"event": "phase_done", "name": "compliance",
+          "passed": sum(1 for c in checks if c["ok"]), "total": len(checks)})
+    return checks
+
+
+def _readiness_row(conc: int, stats: "LoadStats", *, overload: bool) -> dict:
+    rej, hard = _classify_load_errors(stats.errors)
+    req = max(1, stats.requests)
+    return {
+        "conc": conc, "overload": overload,
+        "out_tps": stats.aggregate_tps, "in_tps": stats.input_tps,
+        "total_tps": stats.total_tps, "ttft_p95": stats.ttft_p95,
+        "lat_p95": stats.latency_p95, "tpot_ms": stats.tpot_ms,
+        "req_per_s": stats.req_per_s, "success": stats.success,
+        "requests": stats.requests, "rejected": rej, "hard_err": hard,
+        "rej_frac": rej / req, "hard_frac": hard / req, "est_frac": stats.est_frac,
+    }
+
+
+def _readiness_analysis(rows: list) -> dict:
+    """Locate the throughput bottleneck (from the main sweep) and, separately,
+    grade admission control (from the overload probe) — the two are independent:
+    a backend can shed overload cleanly yet still be decode-bound below it."""
+    main = [r for r in rows if not r["overload"]] or rows
+    ov = next((r for r in rows if r["overload"]), None)
+    base, top = main[0], main[-1]
+    peak_row = max(main, key=lambda r: r["out_tps"])
+    peak = peak_row["out_tps"]
+    # Knee = last level where output throughput still climbed >10% over the prior.
+    knee = main[0]
+    for prev, cur in zip(main, main[1:]):
+        if cur["out_tps"] > prev["out_tps"] * 1.10:
+            knee = cur
+        else:
+            break
+    scale = peak / max(base["out_tps"], 1e-9)
+    ttft_growth = top["ttft_p95"] / max(base["ttft_p95"], 1e-3)
+    tpot_growth = (top["tpot_ms"] / base["tpot_ms"]) if base["tpot_ms"] > 0 else 1.0
+    hard_max = max((r["hard_frac"] for r in rows), default=0.0)
+
+    # Admission control — an independent dimension, judged from the overload row.
+    if ov is None:
+        admission, adm_txt = "none", ""
+    elif ov["hard_frac"] >= 0.05:
+        admission = "breaks"
+        adm_txt = (f" · Overload c={ov['conc']}: BREAKS with {ov['hard_frac'] * 100:.0f}% "
+                   "hard errors/timeouts instead of rejecting cleanly.")
+    elif ov["rej_frac"] >= 0.02:
+        admission = "clean"
+        adm_txt = (f" · Overload c={ov['conc']}: excess rejected cleanly (429/503, "
+                   f"{ov['rej_frac'] * 100:.0f}%) — proper backpressure.")
+    else:
+        admission = "absorbed"
+        adm_txt = (f" · Overload c={ov['conc']}: absorbed +25% with no rejects "
+                   "(headroom, or an unbounded queue — watch TTFT).")
+
+    # Throughput bottleneck — from the main sweep only.
+    if len(main) < 2:
+        btype = "insufficient"
+        text = ("ℹ Only one concurrency level tested — add more (e.g. 1,4,8,16) to locate a "
+                f"bottleneck. Single point: {peak:,.0f} out tok/s at c={top['conc']}.")
+    elif hard_max >= 0.05:
+        btype = "stability"
+        text = (f"❌ Breaks under load — up to {hard_max * 100:.0f}% hard errors/timeouts "
+                "(not clean 429/503). The server or its queue collapses instead of shedding "
+                "load; fix this first.")
+    elif scale < 1.3:
+        btype = "no-batching"
+        text = (f"⚠ Throughput ceiling — output barely scales (×{scale:.1f} from c=1 to "
+                f"c={top['conc']}). Little/no continuous batching: one request already "
+                "saturates it, so parallel traffic just queues.")
+    elif ttft_growth >= 3.0 and ttft_growth >= tpot_growth * 1.5:
+        btype = "prefill"
+        text = (f"⚠ Prefill / queue-bound — TTFT p95 grows ×{ttft_growth:.1f} under load "
+                f"while per-token decode holds (×{tpot_growth:.1f}). Requests queue to start; "
+                f"throughput is fine ({peak:,.0f} tok/s) but first-token latency degrades "
+                f"past c={knee['conc']}.")
+    elif tpot_growth >= 1.5:
+        btype = "decode"
+        text = (f"⚠ Decode-bound — time-per-output-token rises ×{tpot_growth:.1f} under load "
+                f"(KV-cache / memory-bandwidth pressure). Cap concurrency near c={knee['conc']} "
+                "or add capacity to hold latency.")
+    else:
+        btype = "healthy"
+        text = (f"✅ Scales cleanly to c={top['conc']} (×{scale:.1f} throughput, TTFT "
+                f"×{ttft_growth:.1f}, TPOT ×{tpot_growth:.1f}); peak {peak:,.0f} out tok/s.")
+    return {
+        "type": btype, "admission": admission, "text": (text + adm_txt).strip(),
+        "peak_out_tps": peak, "peak_conc": peak_row["conc"], "knee_conc": knee["conc"],
+        "ttft_p95_knee": knee["ttft_p95"], "scale": scale, "ttft_growth": ttft_growth,
+        "tpot_growth": tpot_growth, "hard_frac_max": hard_max,
+    }
+
+
+def _rd_verdict(frac: float, critical_ok: bool, gates: dict, crit_msg: str) -> str:
+    failed = [k for k, v in gates.items() if not v]
+    if not critical_ok:
+        return f"❌ EI SOBI — {crit_msg}"
+    if frac >= 0.999:
+        return "✅ SOBIB — täidab kõik nõuded"
+    if frac >= 0.75:
+        return "⚠ PIIRIPEAL — töötab, aga puudu: " + ", ".join(failed[:3])
+    return "❌ EI SOBI — liiga palju puudujääke: " + ", ".join(failed[:3])
+
+
+def _readiness_verdicts(report: dict) -> dict:
+    checks = {c["name"]: c["ok"] for c in report["compliance"]}
+    a = report["analysis"]
+    sla = report["ttft_sla_s"]
+    stable = a["type"] != "stability"
+    ttft_ok = a["ttft_p95_knee"] <= sla
+
+    def has(name):
+        return checks.get(name, False)
+
+    # OpenRouter: bills on usage, cares about correctness + TTFT + clean backpressure.
+    or_gates = {
+        "Streaming (SSE)": has("Streaming (SSE)"),
+        "Usage accounting": has("Usage accounting"),
+        "max_tokens honored": has("max_tokens honored"),
+        "Stop sequences": has("Stop sequences"),
+        "Concurrent requests": has("Concurrent requests"),
+        "Clean errors": has("Clean error on bad request"),
+        "Stable under load": stable,
+        f"TTFT p95 ≤ {sla:g}s @ knee": ttft_ok,
+    }
+    or_crit = has("Streaming (SSE)") and has("Usage accounting") and stable
+    or_frac = sum(1 for v in or_gates.values() if v) / len(or_gates)
+
+    # HuggingFace / TGI: throughput-serving, so batching-scaling is a first-class gate.
+    hf_gates = {
+        "Streaming (SSE)": has("Streaming (SSE)"),
+        "Chat endpoint": has("Chat endpoint"),
+        "max_tokens honored": has("max_tokens honored"),
+        "Concurrent requests": has("Concurrent requests"),
+        "Stable under load": stable,
+        "Batching scales (≥1.5×)": a["scale"] >= 1.5,
+    }
+    hf_crit = has("Streaming (SSE)") and has("Concurrent requests") and stable
+    hf_frac = sum(1 for v in hf_gates.values() if v) / len(hf_gates)
+
+    return {
+        "openrouter": {"score": or_frac, "gates": or_gates,
+                       "verdict": _rd_verdict(or_frac, or_crit, or_gates,
+                                              "voog / usage-arvestus / stabiilsus puudu")},
+        "huggingface": {"score": hf_frac, "gates": hf_gates,
+                        "verdict": _rd_verdict(hf_frac, hf_crit, hf_gates,
+                                               "voog / concurrency / stabiilsus puudu")},
+    }
+
+
+async def provider_readiness(client: LLMClient, model: Optional[str], *,
+                             in_tokens: int = 1024, out_tokens: int = 256,
+                             sweep_levels: tuple = (1, 4, 8, 16, 32),
+                             reqs_per_level: int = 16, ttft_sla_s: float = 3.0,
+                             overload: bool = True, distinct_prefix: bool = True,
+                             on_progress: Optional[Callable[[dict], None]] = None) -> dict:
+    """Grade a backend's fitness for OpenRouter / HuggingFace traffic and locate
+    its first bottleneck. Streams progress via `on_progress(event)` and returns a
+    report with `compliance`, `sweep`, `analysis` and per-provider `verdicts`.
+    Naturally cancellable — cancelling the task raises at the next await."""
+    if not model:
+        try:
+            models = await client.list_models()
+            model = models[0] if models else None
+        except Exception:
+            model = None
+        if not model:
+            raise RuntimeError("No model specified and model listing failed.")
+
+    def emit(evt: dict):
+        if on_progress:
+            on_progress(evt)
+
+    report: dict = {"model": model, "in_tokens": in_tokens, "out_tokens": out_tokens,
+                    "ttft_sla_s": ttft_sla_s}
+
+    # Phase 1 — API contract compliance.
+    emit({"event": "phase", "name": "compliance", "label": "API contract compliance"})
+    report["compliance"] = await _readiness_compliance(client, model, emit)
+
+    # Phase 2 — concurrency sweep / bottleneck hunt.
+    emit({"event": "phase", "name": "sweep", "label": "Concurrency sweep — bottleneck hunt"})
+    levels = sorted({int(x) for x in sweep_levels if int(x) >= 1})
+    rows: list = []
+    for lvl in levels:
+        reqs = max(reqs_per_level, 2 * lvl)
+        stats = await load(client, model, concurrency=lvl, requests=reqs,
+                           max_tokens=out_tokens, ctx_tokens=in_tokens,
+                           distinct_prefix=distinct_prefix, force_output=True)
+        row = _readiness_row(lvl, stats, overload=False)
+        rows.append(row)
+        emit({"event": "sweep", "row": row})
+    if overload and levels:
+        ov = max(levels[-1] + 1, round(levels[-1] * 1.25))
+        stats = await load(client, model, concurrency=ov, requests=max(reqs_per_level, 2 * ov),
+                           max_tokens=out_tokens, ctx_tokens=in_tokens,
+                           distinct_prefix=distinct_prefix, force_output=True)
+        row = _readiness_row(ov, stats, overload=True)
+        rows.append(row)
+        emit({"event": "sweep", "row": row})
+
+    report["sweep"] = rows
+    report["analysis"] = _readiness_analysis(rows)
+    report["verdicts"] = _readiness_verdicts(report)
+    emit({"event": "done", "report": report})
+    return report

@@ -27,7 +27,15 @@ rasket Qt-installi) ja lisaks boonusena käsurea-liides skriptimiseks.
 - 🎯 **Optimum finder** – eraldi tab, mis **automaatselt leiab optimaalse paralleelsuse ja suurima
   töötava päringusuuruse**. Vt [Optimum finder](#optimum-finder).
 - ⏳ **Soak-test** – hoiab fikseeritud koormust N minutit ja mõõdab **püsivat tokenit sisse/välja
-  tunnis** (+ kas läbilaskevõime püsib stabiilne). Vt [Soak-test](#soak-test).
+  tunnis** (+ kas läbilaskevõime püsib stabiilne). Toetab **TheEye päris-koormuse** kordamist. Vt [Soak-test](#soak-test).
+- 🧪 **Model fit (Openclaw / Hermes)** – eraldi tab, mis hindab **kas mudel sobib agentseks
+  kasutuseks**: Hermes tööriista-kutsed, struktuurne JSON, juhiste järgimine → verdikt
+  SOBIB / PIIRIPEAL / EI SOBI. Vt [Model fit](#model-fit-openclaw--hermes).
+- 🔌 **Provider fit (OpenRouter / HuggingFace)** – eraldi tab, mis kontrollib **kas backend kannatab
+  päris router-liiklust**: API-lepingu vastavus (voogedastus, usage-arvestus, max_tokens/stop,
+  determinism, sampling-parameetrid, puhtad veakoodid) + paralleelsuse sweep, mis leiab
+  läbilaskevõime **põlve ja esimese pudelikaela** (prefill/järjekord, dekodeerimine, batching, admission
+  control). Verdikt SOBIB / PIIRIPEAL / EI SOBI kummalegi pakkujale. Vt [Provider fit](#provider-fit-openrouter--huggingface).
 - 📊 **Testid** (Benchmark-tab):
   - **Kiirus** – latentsus (TTFT, aeg esimese tokenini) + läbilaskevõime (dekodeerimise tokenit/s).
   - **Koormustest** – N paralleelset päringut; agregeeritud tok/s ja p50/p95 latentsus.
@@ -283,6 +291,14 @@ aja jooksul** (nt 30 min) ja saadab pidevalt päringuid.
 - Väljundpikkus forsitakse `ignore_eos`-iga; **suure väljundi puhul tõsta Timeout.**
 - Jooksu saab **Stop**-nupuga katkestada (viimased numbrid jäävad nähtavale).
 
+**TheEye workload (valikuline):** fikseeritud päringusuuruse asemel **kordab TheEye päris
+produktsiooni-liiklust** — iga päring valib taski (kaalutud päris kutsesageduse järgi:
+classification, social_image_understand, extraction, entity_update jne) ja sämpeldab sisend/väljund
+tokenite arvu selle taski mõõdetud jaotusest (lognormaalne sobitus keskmise/p95 järgi). Nii saad
+**realistliku püsiva tokenit/tunnis** oma tegeliku koormuse jaoks (enamik lühikesed struktureeritud
+kutsed ~1,3k sisse / ~150 välja + harv raske entity-genereerimine). Sisend/väljund väljad
+ignoreeritakse — muudad ainult **aega ja concurrency't**.
+
 **Overload probe (+10%, vaikimisi sees):** jooksutab **10% üle concurrency limiidi** (nt 64 → 72), et
 kontrollida **admission control'i** — kas server lükkab üleliigsed päringud korrektselt tagasi (nagu
 OpenRouter / HuggingFace / hästi seadistatud vLLM), või võtab kõik vastu ja degradeerub vaikselt.
@@ -299,6 +315,75 @@ Tagasilükkamised (429/503) eristatakse "kõvadest" vigadest (timeout, connectio
 > siis mõõdab soak-test *maksimaalset* püsivat läbilaskevõimet. Ja mäleta, et tokenit/tunnis sõltub
 > töökoormuse kujust (sisend/väljund suhe): RAG-koormus annab palju tokenit **sisse**, chat/agentic
 > rohkem **välja**.
+
+## Model fit (Openclaw / Hermes)
+
+Eraldi **Model fit** tab ei mõõda kiirust vaid **võimekust**: kas mudel sobib agentseks
+kasutuseks (Openclaw / Hermes tööriista-kutsumine). Jooksutab paarikümne lühikese proovi
+patarei (determistlik, temperature 0) ja annab verdikti **SOBIB / PIIRIPEAL / EI SOBI**.
+
+Testitavad dimensioonid (igaüks lülitatav, annab 0–100% skoori):
+
+1. **Hermes tööriista-kutsed** — mudelile antakse Hermes-formaadis süsteemiprompt `<tools>`
+   definitsioonidega (get_weather, web_search, calculator, send_email) ja ta peab vastama
+   valiidse `<tool_call>{"name":…,"arguments":…}</tool_call>` plokiga. Hinnatakse: kas
+   väljastab parse'itava tööriista-JSON-i, valib **õige tööriista**, täidab **õiged
+   argumendid**, ja — oluline — **ei kutsu tööriista** kui küsimus vajab tavalist vastust
+   (valekutsete määr peaks olema 0%). See on põhiline agentne võimekus.
+2. **Struktuurne JSON väljund** — mudelilt küsitakse kindlat JSON-kuju ilma proosa/koodiaedadeta;
+   hinnatakse kas vastus parse'ub ja vastab nõutud võtmetele/tüüpidele (mis muidu lõhub
+   `json.loads()`-pipeline'i).
+3. **Juhiste järgimine & formaadidistsipliin** — ranged formaadikäsud (täpselt üks sõna, ainult
+   number, kolm rida) + kontroll, et mudel **ei leki mõtlemist / `<think>` tellinguid** nähtavasse
+   vastusesse, mida agent peab parse'ima.
+4. **Latents & läbilaskevõime** — mõõdab vastuse-latentsi ja väljund-tok/s kõigi proovide peal.
+
+**Verdikt** on kaalutud segu (tööriist 0.5, JSON 0.25, juhised 0.25) + **kõva värav**: kui mudel
+ei suuda usaldusväärselt tööriistu kutsuda (valiidsete tool-call'ide määr < 50%), on tulemus
+alati **EI SOBI**, ükskõik kui puhas on ülejäänu. Tulemuste tabel näitab iga proovi eraldi
+(✓/✗ + detail), et näeksid täpselt, kus mudel komistab.
+
+## Provider fit (OpenRouter / HuggingFace)
+
+Eraldi **Provider fit** tab vastab kahele küsimusele: **kas see backend kannataks päris
+OpenRouteri / HuggingFace inference-liiklust**, ja **kus ta esimesena katki läheb**. Kaks faasi:
+
+### 1. API-lepingu vastavus
+
+Kiired üksik-proovid, igaüks vastab ühele kõvale nõudele, mille router serverile esitab (✓/✗):
+
+- **Chat endpoint** — `/v1/chat/completions` tagastab vastuse.
+- **Streaming (SSE)** — vastus tuleb token-haaval (TTFT < koguaeg), mitte puhverdatult.
+- **Usage-arvestus** — server tagastab prompt/completion tokenite arvu. Routerid **arveldavad selle
+  järgi**, seega puuduv usage-blokk on OpenRouteri jaoks blokeeriv.
+- **max_tokens** — genereerimine peatub limiidil; **finish_reason=length** katkestusel.
+- **Stop-järjestused** — `stop` parameetrit järgitakse.
+- **Determinism (temp 0)** — sama prompt annab identse väljundi (greedy dekodeerimine).
+- **Sampling-parameetrid** — temperature/top_p/seed **päriselt rakenduvad** (erinev seed → erinev väljund).
+- **Concurrent-korrektsus** — paralleelne päringu-puhang õnnestub tervikuna.
+- **Puhtad veakoodid** — vigane päring saab 4xx JSON-vea, mitte 5xx / rippumise.
+
+### 2. Paralleelsuse sweep — pudelikaela otsing
+
+Käib läbi paralleelsuse tasemed (nt 1,4,8,16,32) realistliku päringukujuga ja mõõdab igal tasemel
+väljund-tok/s, TTFT p95, TPOT (aeg väljund-tokeni kohta), req/s ja **429/503 vs kõvad vead**. Sellest
+tuletatakse:
+
+- **Läbilaskevõime põlv (knee)** — paralleelsus, kus tok/s lakkab kasvamast (jätkusuutlik lagi).
+- **Esimene pudelikael** — dominantne signaal:
+  - **Prefill / järjekorra-piir** — TTFT p95 plahvatab koormuse all, TPOT püsib → päringud seisavad
+    järjekorras (scheduler/prefill on kitsaskoht); läbilaskevõime OK, aga esimese tokeni latents kannatab.
+  - **Dekodeerimise-piir** — TPOT tõuseb koormuse all → KV-cache / mäluriba surve dekodeerimis-batchis.
+  - **Batching puudub** — tok/s ei skaleeru paralleelsusega (üks päring küllastab juba GPU); halb TGI-stiilis
+    läbilaskevõimele.
+  - **Admission control** — ülekoormuse proovik (+25%) lükatakse puhtalt tagasi (429/503) → korralik
+    backpressure routeri jaoks.
+  - **Katki koormuse all** — kõvad vead / timeout'id puhaste tagasilükete asemel.
+
+**Verdikt** kummalegi pakkujale eraldi (nende rõhuasetused erinevad): **OpenRouter** nõuab
+usage-arvestust, stop/max_tokens järgimist, TTFT p95 ≤ SLA põlve juures ja puhast admission control'i;
+**HuggingFace / TGI** rõhub läbilaskevõimel, seega **batching peab skaleeruma (≥1.5×)**. Tulemus salvestub
+History-sse (tipp-tok/s), nii et näed jooksude-vahelist muutust.
 
 ## Kuidas see töötab
 
@@ -324,12 +409,12 @@ skannimine võib olla seadusevastane.
 
 ```
 llmscanner/
-├── gui.py        # Tkinter GUI (peamine) — Connection / Benchmark / Optimum finder / Scan / History
+├── gui.py        # Tkinter GUI (peamine) — Connection / Benchmark / Optimum finder / Soak / Model fit / Provider fit / Scan / History
 ├── cli.py        # käsurea-liides (boonus, vajab rich)
 ├── client.py     # OpenAI-ühilduv async klient (http/https, base_path) + ajamõõtmine
 ├── detect.py     # serveri tuvastus / fingerprint + smart_detect (kandidaatide proovimine)
 ├── scanner.py    # võrguskann + portide tuvastus
-├── benchmark.py  # latentsus / koormus / kontekst / sanity / sweep + find_optima (optimum finder)
+├── benchmark.py  # latentsus / koormus / kontekst / sanity / sweep + find_optima + soak_test + suitability_test (model fit) + provider_readiness
 ├── store.py      # SQLite püsivus: salvestatud hostid + kõik tulemused
 ├── icon.py       # rakenduse ikooni (sinine V) genereerimine
 ├── assets/

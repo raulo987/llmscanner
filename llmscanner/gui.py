@@ -208,6 +208,14 @@ INFO = {
         "Give each request a unique preamble so a prefix-affinity gateway spreads the load "
         "across all backends (essential for a multi-machine cluster — otherwise it pins to "
         "one). Keep on unless you deliberately want single-backend numbers."),
+    "soak_theeye": (
+        "Replay the real TheEye production traffic mix instead of one fixed request size. "
+        "Each request samples a task type (weighted by its real call rate — classification, "
+        "social_image_understand, extraction, entity_update, …) and draws input/output token "
+        "counts from that task's measured distribution (lognormal fit to mean/p95).\n\n"
+        "This gives a realistic sustained tokens/hour for your actual workload — mostly short "
+        "structured calls (~1.3k in / ~150 out) with an occasional heavy entity generation. "
+        "The Input/Output token fields are ignored; you only set duration and concurrency."),
     "soak_overload": (
         "Run at 10% ABOVE the Concurrency (e.g. 64 → 72) to test admission control: a good "
         "gateway (OpenRouter, HuggingFace, a well-configured vLLM) rejects the overflow "
@@ -216,6 +224,53 @@ INFO = {
         "• clean 429/503 for the excess → proper backpressure ✓\n"
         "• no rejections but output truncated / degraded → no admission control ⚠\n"
         "• timeouts / hard errors → the server breaks under overload ✗"),
+    # ---- Model fit (Openclaw / Hermes) ----
+    "fit_tool": (
+        "Hermes-style function calling. The model gets a system prompt with tool "
+        "definitions in <tools> tags and must answer with a valid "
+        "<tool_call>{\"name\":…,\"arguments\":…}</tool_call> block. Scored on: does it "
+        "emit parseable tool JSON, pick the right tool, fill the right arguments, and "
+        "— crucially — NOT call a tool when the query needs a plain answer. This is "
+        "the core agentic capability Openclaw/Hermes depend on."),
+    "fit_json": (
+        "Strict JSON output. The model is asked for a specific JSON shape with no prose "
+        "or code fences. Scored on whether the reply parses as JSON and matches the "
+        "requested keys/types — what breaks a pipeline that json.loads() the output."),
+    "fit_instruct": (
+        "Instruction following & format discipline. Tight formatting orders (exactly "
+        "one word, only a number, three lines) plus a check that the model doesn't leak "
+        "reasoning / <think> scaffolding into the visible answer an agent has to parse."),
+    "fit_latency": (
+        "Measures response latency and output tok/s across every probe above, so you "
+        "see whether the model is fast enough for interactive agentic use, not just "
+        "whether it's correct."),
+    # ---- Provider fit (OpenRouter / HuggingFace) ----
+    "rd_in": (
+        "Input (prompt) tokens per request in the concurrency sweep — the request "
+        "shape the load is measured at. ~1k models a typical chat/RAG turn; raise it "
+        "to stress prefill, lower it for short-prompt chat traffic."),
+    "rd_out": (
+        "Output tokens per request, forced with ignore_eos so every request decodes "
+        "this many. Governs how decode-heavy the traffic is."),
+    "rd_sweep": (
+        "Concurrency levels to sweep, comma-separated (e.g. 1,4,8,16,32). Each level "
+        "runs a short load batch; comparing them reveals where throughput stops "
+        "scaling (the knee) and whether latency degrades — the bottleneck signature."),
+    "rd_reqs": (
+        "Requests per sweep level (at least 2× the concurrency is used, whichever is "
+        "larger) so each level reaches steady state. Higher = steadier numbers, longer run."),
+    "rd_sla": (
+        "TTFT p95 target in seconds. A provider verdict counts TTFT as passing when the "
+        "95th-percentile time-to-first-token AT THE THROUGHPUT KNEE stays under this. "
+        "Routers care about first-token latency; 2–3s is a reasonable local target."),
+    "rd_overload": (
+        "After the sweep, run one extra level 25% above the top concurrency to test "
+        "admission control: a router-grade backend rejects the excess cleanly with "
+        "429/503 rather than accepting it and timing out."),
+    "rd_distinct": (
+        "Give each request a unique preamble so a prefix-affinity gateway spreads the "
+        "load across backends instead of pinning it to one GPU (see the Soak tab). Keep "
+        "on for cluster-realistic numbers."),
     # ---- History ----
     "hist_filter": (
         "Type to filter the results list — matches host, model, test type and summary. "
@@ -586,6 +641,8 @@ class App:
         self.tab_bench = self.tabview.add("Benchmark")
         self.tab_opt = self.tabview.add("Optimum finder")
         self.tab_soak = self.tabview.add("Soak")
+        self.tab_fit = self.tabview.add("Model fit")
+        self.tab_ready = self.tabview.add("Provider fit")
         self.tab_scan = self.tabview.add("Network scan")
         self.tab_history = self.tabview.add("History")
 
@@ -593,6 +650,8 @@ class App:
         self._build_bench_tab()
         self._build_opt_tab()
         self._build_soak_tab()
+        self._build_modelfit_tab()
+        self._build_readiness_tab()
         self._build_scan_tab()
         self._build_history_tab()
 
@@ -1155,6 +1214,7 @@ class App:
         self.var_soak_dur = tk.StringVar(value="30")
         self.var_soak_distinct = tk.BooleanVar(value=True)
         self.var_soak_overload = tk.BooleanVar(value=True)
+        self.var_soak_theeye = tk.BooleanVar(value=False)
 
         sec, top = self._section(self.tab_soak, "Sustained throughput (tokens / hour)")
         sec.pack(fill="x", padx=12, pady=(10, 6))
@@ -1178,6 +1238,12 @@ class App:
                                   "server rejects the excess cleanly",
                         variable=self.var_soak_overload).pack(side="left")
         self._info_icon(fr2, "Overload probe", INFO["soak_overload"]).pack(side="left", padx=(5, 0))
+        fr3 = ctk.CTkFrame(top, fg_color="transparent")
+        fr3.grid(row=4, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
+        ctk.CTkCheckBox(fr3, text="TheEye workload — replay the real production traffic mix "
+                                  "(input/output fields ignored; only time & concurrency apply)",
+                        variable=self.var_soak_theeye).pack(side="left")
+        self._info_icon(fr3, "TheEye workload", INFO["soak_theeye"]).pack(side="left", padx=(5, 0))
 
         runbar = ctk.CTkFrame(self.tab_soak, fg_color="transparent")
         runbar.pack(fill="x", padx=12, pady=4)
@@ -1233,8 +1299,10 @@ class App:
             overload = bool(self.var_soak_overload.get())
             # +10% concurrency (at least one extra request) to probe admission control.
             eff_conc = max(base_conc + 1, round(base_conc * 1.1)) if overload else base_conc
+            theeye = bool(self.var_soak_theeye.get())
             cfg = {
                 "base_conc": base_conc, "overload": overload, "concurrency": eff_conc,
+                "theeye": theeye,
                 "ctx_tokens": max(1, int(self.var_soak_in.get())),
                 "gen_tokens": max(1, int(self.var_soak_out.get())),
                 "duration_s": max(1.0, float(self.var_soak_dur.get()) * 60.0),
@@ -1247,6 +1315,7 @@ class App:
         self._soak_target_out = cfg["gen_tokens"]
         self._soak_base_conc = cfg["base_conc"]
         self._soak_overload = cfg["overload"]
+        self._soak_theeye = cfg["theeye"]
         client = LLMClient.from_target(
             target, api_key=self.var_apikey.get().strip() or "EMPTY",
             timeout=cfg["timeout"], endpoint=self.var_endpoint.get())
@@ -1256,11 +1325,12 @@ class App:
         mins = cfg["duration_s"] / 60.0
         cdesc = (f"c={cfg['concurrency']} (base {cfg['base_conc']} +10% overload probe)"
                  if cfg["overload"] else f"c={cfg['concurrency']}")
+        wdesc = "TheEye workload mix" if cfg["theeye"] else f"in {cfg['ctx_tokens']} / out {cfg['gen_tokens']} tok"
         self.soak_log.write(f"▶ Soak · {client.base_url}", "head")
-        self.soak_log.write(f"        {cdesc} · in {cfg['ctx_tokens']} / "
-                            f"out {cfg['gen_tokens']} tok · {mins:g} min", "dim")
-        self.soak_readout.configure(text=f"Starting… {cdesc}, "
-                                         f"{cfg['ctx_tokens']}/{cfg['gen_tokens']} tok, {mins:g} min")
+        self.soak_log.write(f"        {cdesc} · {wdesc} · {mins:g} min", "dim")
+        self.soak_readout.configure(text=f"Starting… {cdesc}, {wdesc}, {mins:g} min")
+
+        sampler = B.theeye_sample if cfg["theeye"] else None
 
         def on_progress(snap):
             self.post(lambda s=snap: self._soak_progress(s))
@@ -1269,13 +1339,14 @@ class App:
             B.soak_test(client, self._resolved_model(),
                         concurrency=cfg["concurrency"], ctx_tokens=cfg["ctx_tokens"],
                         gen_tokens=cfg["gen_tokens"], duration_s=cfg["duration_s"],
-                        distinct_prefix=cfg["distinct_prefix"], on_progress=on_progress),
+                        distinct_prefix=cfg["distinct_prefix"], sampler=sampler,
+                        on_progress=on_progress),
             self._soak_done, status="Soak test running…")
 
     @staticmethod
-    def _soak_verdict(s: dict, target_out: int) -> str:
+    def _soak_verdict(s: dict) -> str:
         """Admission-control assessment for the overload probe."""
-        degraded = (s["gen_actual"] < 0.7 * max(1, target_out)) or s["est_frac"] >= 0.3
+        degraded = s["undergen_frac"] >= 0.2 or s["est_frac"] >= 0.3
         if s["hard_err_frac"] >= 0.05:
             return ("❌ breaks under overload — hard errors/timeouts "
                     f"({s['hard_err_frac'] * 100:.0f}%), not clean rejections")
@@ -1289,9 +1360,8 @@ class App:
 
     def _soak_readout_text(self, s: dict) -> str:
         warn = ""
-        target_out = getattr(self, "_soak_target_out", 1)
-        if s["gen_actual"] < 0.5 * target_out and s["success"]:
-            warn += "  ⚠ under-gen"
+        if s["undergen_frac"] >= 0.1:
+            warn += f"  ⚠ under-gen {s['undergen_frac'] * 100:.0f}%"
         if s["est_frac"] >= 0.5:
             warn += "  ⚠ est-tokens"
         return (
@@ -1328,18 +1398,406 @@ class App:
              ("req/s", f"{s['req_per_s']:.2f}"),
              ("TPOT (ms)", f"{s['tpot_ms']:.1f}" if s['tpot_ms'] > 0 else "–"),
              ("latency p50 / p95 (s)", f"{s['lat_p50']:.2f} / {s['lat_p95']:.2f}"),
-             ("mean output tok/req", f"{s['gen_actual']:.0f} / {getattr(self, '_soak_target_out', '?')}"),
+             ("mean in/out tok/req",
+              f"{(s['in_tokens'] / s['success']) if s['success'] else 0:.0f} / {s['gen_actual']:.0f}"
+              + (f" (requested {s['req_out_mean']:.0f})" if getattr(self, '_soak_theeye', False)
+                 else f" / {getattr(self, '_soak_target_out', '?')}")),
+             ("under-gen requests", f"{s['undergen_frac'] * 100:.1f}%"),
              ("rejected (429/503)", f"{s['rejected']} ({s['rejected_frac'] * 100:.1f}%)"),
              ("hard errors", f"{s['hard_err']} ({s['hard_err_frac'] * 100:.1f}%)"),
              ("est tokens", f"{s['est_frac'] * 100:.0f}%")])
         if getattr(self, "_soak_overload", False):
-            verdict = self._soak_verdict(s, getattr(self, "_soak_target_out", 1))
+            verdict = self._soak_verdict(s)
             base = getattr(self, "_soak_base_conc", "?")
             self.soak_log.write(f"Overload probe (base {base} +10% → c={s['concurrency']}): {verdict}",
                                 "ok" if verdict.startswith(("✅", "✓")) else "err")
         for e in s.get("error_samples", []):
             self.soak_log.write(f"   error: {e[:70]}", "err")
         self._set_status("Soak test complete.")
+
+    # ---------------------------------------------------------- Model fit tab
+    def _build_modelfit_tab(self):
+        self.var_fit_tool = tk.BooleanVar(value=True)
+        self.var_fit_json = tk.BooleanVar(value=True)
+        self.var_fit_instruct = tk.BooleanVar(value=True)
+        self.var_fit_latency = tk.BooleanVar(value=True)
+
+        sec, top = self._section(self.tab_fit, "Model fit — Openclaw / Hermes suitability")
+        sec.pack(fill="x", padx=12, pady=(10, 6))
+
+        intro = ctk.CTkLabel(
+            top, anchor="w", justify="left", text_color=self.pal["sub"],
+            text=("Runs a battery of capability probes and grades whether the model is fit "
+                  "for agentic use (Hermes tool-calling). Verdict: SOBIB / PIIRIPEAL / EI SOBI."))
+        intro.grid(row=0, column=0, columnspan=4, sticky="w", padx=12, pady=(4, 6))
+
+        def check(r, label, var, info):
+            fr = ctk.CTkFrame(top, fg_color="transparent")
+            fr.grid(row=r, column=0, columnspan=4, sticky="w", padx=12, pady=2)
+            ctk.CTkCheckBox(fr, text=label, variable=var).pack(side="left")
+            self._info_icon(fr, label, info).pack(side="left", padx=(5, 0))
+
+        check(1, "Hermes tool-calling (valid <tool_call>, right tool & args, no spurious calls)",
+              self.var_fit_tool, INFO["fit_tool"])
+        check(2, "Structured JSON output (strict, parseable, correct schema)",
+              self.var_fit_json, INFO["fit_json"])
+        check(3, "Instruction following & format discipline (no leaked reasoning)",
+              self.var_fit_instruct, INFO["fit_instruct"])
+        check(4, "Latency & throughput on these prompts",
+              self.var_fit_latency, INFO["fit_latency"])
+
+        runbar = ctk.CTkFrame(self.tab_fit, fg_color="transparent")
+        runbar.pack(fill="x", padx=12, pady=4)
+        self.btn_fit = ctk.CTkButton(runbar, text="Run model-fit test", command=self.on_run_modelfit)
+        self.btn_fit.pack(side="left")
+        btn_fit_cancel = ctk.CTkButton(runbar, text="Stop", width=80, state="disabled",
+                                       fg_color="#b04a4a", hover_color="#963c3c",
+                                       command=self.cancel_current)
+        btn_fit_cancel.pack(side="left", padx=8)
+        self._cancel_btns.append(btn_fit_cancel)
+        ctk.CTkLabel(runbar, text="Deterministic (temperature 0) — a couple dozen short probes.",
+                     text_color=self.pal["sub"]).pack(side="left", padx=10)
+
+        self.fit_readout = ctk.CTkLabel(
+            self.tab_fit, text="Pick the checks and press ‘Run model-fit test’.",
+            anchor="w", justify="left", font=ctk.CTkFont(size=15, weight="bold"))
+        self.fit_readout.pack(fill="x", padx=16, pady=(2, 4))
+
+        sec3, body = self._section(self.tab_fit, "Live")
+        sec3.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        split = ttk.PanedWindow(body, orient="horizontal")
+        split.pack(fill="both", expand=True)
+        left = ctk.CTkFrame(split, fg_color="transparent")
+        right = ctk.CTkFrame(split)
+        split.add(left, weight=3)
+        split.add(right, weight=2)
+        cols = ("dim", "case", "result", "detail")
+        wrap, self.fit_tree = self._tree_with_scrollbars(left, cols, height=14, horizontal=True)
+        for c, w, txt in (("dim", 80, "dimension"), ("case", 300, "probe"),
+                          ("result", 60, "ok"), ("detail", 260, "detail")):
+            self.fit_tree.heading(c, text=txt)
+            self.fit_tree.column(c, width=w, anchor="w")
+        self.fit_tree.tag_configure("pass", foreground=self.pal["live_ok"])
+        self.fit_tree.tag_configure("fail", foreground=self.pal["live_err"])
+        wrap.pack(fill="both", expand=True)
+        self.fit_log = LiveLog(right, self.pal, fg_color="transparent")
+        self.fit_log.pack(fill="both", expand=True)
+
+    def on_run_modelfit(self):
+        try:
+            target = resolve_target(self.var_host.get(), self.var_port.get())
+        except ValueError as e:
+            return self._error(ValueError(f"Invalid host: {e}"))
+        dims = [d for d, v in (("tool", self.var_fit_tool), ("json", self.var_fit_json),
+                               ("instruct", self.var_fit_instruct),
+                               ("latency", self.var_fit_latency)) if v.get()]
+        if not dims or dims == ["latency"]:
+            return self._error(ValueError("Select at least one capability dimension to test."))
+        client = LLMClient.from_target(
+            target, api_key=self.var_apikey.get().strip() or "EMPTY",
+            timeout=float(self.var_timeout.get() or 95), endpoint=self.var_endpoint.get())
+        self._remember_endpoint(target.host, target.port)
+        # Stash connection + params so _modelfit_done can persist the result to
+        # History and show the run-over-run comparison, like the Benchmark tab.
+        self._fit_conn = (client.host, client.port, client.endpoint)
+        self._fit_params = {"dims": dims}
+        for iid in self.fit_tree.get_children():
+            self.fit_tree.delete(iid)
+        self.fit_log.clear()
+        self.fit_log.write(f"▶ Model fit · {client.base_url}", "head")
+        self.fit_log.write(f"        dimensions: {', '.join(dims)}", "dim")
+        self.fit_readout.configure(text="Running probes…")
+
+        def on_progress(evt):
+            self.post(lambda e=evt: self._modelfit_progress(e))
+
+        self.run_async(
+            B.suitability_test(client, self._resolved_model(), dims=dims,
+                               on_progress=on_progress),
+            self._modelfit_done, status="Model-fit test running…")
+
+    _DIM_LABEL = {"tool": "tool-call", "json": "json", "instruct": "instruct"}
+
+    def _modelfit_progress(self, evt: dict):
+        ev = evt.get("event")
+        if ev == "case":
+            dim = self._DIM_LABEL.get(evt["dim"], evt["dim"])
+            mark = "✓" if evt["ok"] else "✗"
+            self.fit_tree.insert("", "end", tags=("pass" if evt["ok"] else "fail",),
+                                 values=(dim, evt["user"][:70], mark, evt["detail"][:80]))
+            self.fit_tree.yview_moveto(1.0)
+        elif ev == "dim_done":
+            self.fit_log.write(f"   {evt['dim']}: score {evt['score'] * 100:.0f}%",
+                               "ok" if evt["score"] >= 0.85 else "err")
+
+    def _modelfit_done(self, report: dict):
+        v = report["verdict"]
+        colour = (self.pal["live_ok"] if v.startswith("✅")
+                  else "#d0902a" if v.startswith("⚠") else self.pal["live_err"])
+        self.fit_readout.configure(text=f"{v}   (overall {report['overall'] * 100:.0f}%)",
+                                   text_color=colour)
+        self.fit_log.write("✓ Model-fit test complete", "ok")
+
+        rows = []
+        sc = report.get("scores", {})
+        if "tool" in report:
+            t = report["tool"]
+            rows.append(("Hermes tool-calling", f"{sc.get('tool', 0) * 100:.0f}%"))
+            rows.append(("  valid tool JSON", f"{t['valid_rate'] * 100:.0f}%"))
+            rows.append(("  correct tool", f"{t['select_rate'] * 100:.0f}%"))
+            rows.append(("  correct arguments", f"{t['arg_rate'] * 100:.0f}%"))
+            rows.append(("  spurious calls (should be 0)", f"{t['falsecall_rate'] * 100:.0f}%"))
+        if "json" in report:
+            j = report["json"]
+            rows.append(("Structured JSON", f"{sc.get('json', 0) * 100:.0f}%"))
+            rows.append(("  parses / correct schema",
+                         f"{j['parse_rate'] * 100:.0f}% / {j['schema_rate'] * 100:.0f}%"))
+        if "instruct" in report:
+            i = report["instruct"]
+            rows.append(("Instruction following", f"{sc.get('instruct', 0) * 100:.0f}%"))
+            rows.append(("  format followed / reasoning leaked",
+                         f"{i['follow_rate'] * 100:.0f}% / {i['leak_rate'] * 100:.0f}%"))
+        if "latency" in report:
+            l = report["latency"]
+            rows.append(("Latency mean / p95",
+                         f"{l['mean_s']:.2f}s / {l['p95_s']:.2f}s · {l['mean_out_tps']:.0f} tok/s"))
+        self.fit_log.result("Suitability", v, rows, failed=not v.startswith("✅"))
+        # Persist to History + show the run-over-run comparison (overall fit %),
+        # mirroring how the Benchmark tab records each result.
+        conn = getattr(self, "_fit_conn", None)
+        if conn:
+            host, port, endpoint = conn
+            params = getattr(self, "_fit_params", {"dims": report.get("dims", [])})
+            self._record_and_compare(
+                host, port, report.get("model", ""), endpoint, "model-fit",
+                params, v, rows,
+                value=report.get("overall", 0.0) * 100, value_label="fit %")
+        self._set_status("Model-fit test complete.")
+
+    # ------------------------------------------------------ Provider fit tab
+    def _build_readiness_tab(self):
+        self.var_rd_in = tk.StringVar(value="1024")
+        self.var_rd_out = tk.StringVar(value="256")
+        self.var_rd_sweep = tk.StringVar(value="1,4,8,16,32")
+        self.var_rd_reqs = tk.StringVar(value="16")
+        self.var_rd_sla = tk.StringVar(value="3")
+        self.var_rd_overload = tk.BooleanVar(value=True)
+        self.var_rd_distinct = tk.BooleanVar(value=True)
+
+        sec, top = self._section(self.tab_ready,
+                                 "Provider fit — OpenRouter / HuggingFace readiness")
+        sec.pack(fill="x", padx=12, pady=(10, 6))
+
+        intro = ctk.CTkLabel(
+            top, anchor="w", justify="left", text_color=self.pal["sub"],
+            text=("Checks the API contract routers require (streaming, usage accounting, "
+                  "max_tokens/stop, deterministic decode, sampling params, clean errors), "
+                  "then sweeps concurrency to find the throughput knee and the first "
+                  "bottleneck. Verdict: SOBIB / PIIRIPEAL / EI SOBI per provider."))
+        intro.grid(row=0, column=0, columnspan=4, sticky="w", padx=12, pady=(4, 6))
+
+        def field(r, c, label, var, info, w=110):
+            self._lbl(top, label, info).grid(row=r, column=c, sticky="e", padx=(12, 4), pady=5)
+            ctk.CTkEntry(top, textvariable=var, width=w).grid(row=r, column=c + 1, sticky="w", pady=5)
+
+        field(1, 0, "Input tokens / req", self.var_rd_in, INFO["rd_in"])
+        field(1, 2, "Output tokens / req", self.var_rd_out, INFO["rd_out"])
+        field(2, 0, "Concurrency sweep", self.var_rd_sweep, INFO["rd_sweep"], w=150)
+        field(2, 2, "Requests / level", self.var_rd_reqs, INFO["rd_reqs"])
+        field(3, 0, "TTFT p95 SLA (s)", self.var_rd_sla, INFO["rd_sla"])
+        fr = ctk.CTkFrame(top, fg_color="transparent")
+        fr.grid(row=4, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
+        ctk.CTkCheckBox(fr, text="Overload probe (+25%) — check clean admission control",
+                        variable=self.var_rd_overload).pack(side="left")
+        self._info_icon(fr, "Overload probe", INFO["rd_overload"]).pack(side="left", padx=(5, 0))
+        fr2 = ctk.CTkFrame(top, fg_color="transparent")
+        fr2.grid(row=5, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
+        ctk.CTkCheckBox(fr2, text="Distinct request prefixes (spread across backends)",
+                        variable=self.var_rd_distinct).pack(side="left")
+        self._info_icon(fr2, "Distinct request prefixes", INFO["rd_distinct"]).pack(side="left", padx=(5, 0))
+
+        runbar = ctk.CTkFrame(self.tab_ready, fg_color="transparent")
+        runbar.pack(fill="x", padx=12, pady=4)
+        self.btn_ready = ctk.CTkButton(runbar, text="Run provider-fit test",
+                                       command=self.on_run_readiness)
+        self.btn_ready.pack(side="left")
+        btn_ready_cancel = ctk.CTkButton(runbar, text="Stop", width=80, state="disabled",
+                                         fg_color="#b04a4a", hover_color="#963c3c",
+                                         command=self.cancel_current)
+        btn_ready_cancel.pack(side="left", padx=8)
+        self._cancel_btns.append(btn_ready_cancel)
+        ctk.CTkLabel(runbar, text="Compliance probes then a concurrency sweep — raise the "
+                                  "Timeout for large output sizes.",
+                     text_color=self.pal["sub"]).pack(side="left", padx=10)
+
+        self.ready_readout = ctk.CTkLabel(
+            self.tab_ready, text="Set the traffic shape and press ‘Run provider-fit test’.",
+            anchor="w", justify="left", font=ctk.CTkFont(size=15, weight="bold"))
+        self.ready_readout.pack(fill="x", padx=16, pady=(2, 4))
+
+        sec3, body = self._section(self.tab_ready, "Live")
+        sec3.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        split = ttk.PanedWindow(body, orient="horizontal")
+        split.pack(fill="both", expand=True)
+        left = ctk.CTkFrame(split, fg_color="transparent")
+        right = ctk.CTkFrame(split)
+        split.add(left, weight=3)
+        split.add(right, weight=2)
+        self.ready_chart = ChartCanvas(left, height=170)
+        self.ready_chart.pack(fill="x")
+        cols = ("conc", "out_tps", "ttft", "tpot", "reqs", "rej", "err")
+        wrap, self.ready_tree = self._tree_with_scrollbars(left, cols, height=8, horizontal=True)
+        for c, w, txt in (("conc", 60, "conc"), ("out_tps", 90, "out tok/s"),
+                          ("ttft", 90, "TTFT p95"), ("tpot", 80, "TPOT ms"),
+                          ("reqs", 80, "ok/req"), ("rej", 70, "429/503"),
+                          ("err", 70, "hard err")):
+            self.ready_tree.heading(c, text=txt)
+            self.ready_tree.column(c, width=w, anchor="w")
+        self.ready_tree.tag_configure("ovl", foreground=self.pal["warn"])
+        wrap.pack(fill="both", expand=True, pady=(6, 0))
+        self.ready_log = LiveLog(right, self.pal, fg_color="transparent")
+        self.ready_log.pack(fill="both", expand=True)
+
+    def on_run_readiness(self):
+        try:
+            target = resolve_target(self.var_host.get(), self.var_port.get())
+            levels = [int(x) for x in self.var_rd_sweep.get().replace(" ", "").split(",") if x]
+            levels = sorted({x for x in levels if x >= 1})
+            if not levels:
+                return self._error(ValueError("Enter at least one concurrency level (e.g. 1,4,8,16)."))
+            cfg = {
+                "in_tokens": max(1, int(self.var_rd_in.get())),
+                "out_tokens": max(1, int(self.var_rd_out.get())),
+                "levels": levels,
+                "reqs_per_level": max(1, int(self.var_rd_reqs.get())),
+                "ttft_sla_s": max(0.1, float(self.var_rd_sla.get())),
+                "overload": bool(self.var_rd_overload.get()),
+                "distinct_prefix": bool(self.var_rd_distinct.get()),
+                "timeout": float(self.var_timeout.get() or 95),
+            }
+        except ValueError as e:
+            return self._error(ValueError(f"Invalid number: {e}"))
+
+        client = LLMClient.from_target(
+            target, api_key=self.var_apikey.get().strip() or "EMPTY",
+            timeout=cfg["timeout"], endpoint=self.var_endpoint.get())
+        self._remember_endpoint(target.host, target.port)
+        # Stash for History persistence in _readiness_done (like the other tabs).
+        self._rd_conn = (client.host, client.port, client.endpoint)
+        self._rd_params = {"sweep_levels": ",".join(map(str, levels)),
+                           "in": cfg["in_tokens"], "out": cfg["out_tokens"]}
+        self._rd_rows = []
+
+        for iid in self.ready_tree.get_children():
+            self.ready_tree.delete(iid)
+        self.ready_chart.clear()
+        self.ready_log.clear()
+        self.ready_log.write(f"▶ Provider fit · {client.base_url}", "head")
+        self.ready_log.write(f"        sweep {levels} · in {cfg['in_tokens']} / out "
+                             f"{cfg['out_tokens']} tok · TTFT SLA {cfg['ttft_sla_s']:g}s", "dim")
+        self.ready_readout.configure(text="Running compliance probes…")
+
+        def on_progress(evt):
+            self.post(lambda e=evt: self._readiness_progress(e))
+
+        self.run_async(
+            B.provider_readiness(client, self._resolved_model(),
+                                 in_tokens=cfg["in_tokens"], out_tokens=cfg["out_tokens"],
+                                 sweep_levels=tuple(levels),
+                                 reqs_per_level=cfg["reqs_per_level"],
+                                 ttft_sla_s=cfg["ttft_sla_s"], overload=cfg["overload"],
+                                 distinct_prefix=cfg["distinct_prefix"],
+                                 on_progress=on_progress),
+            self._readiness_done, status="Provider-fit test running…")
+
+    def _readiness_progress(self, evt: dict):
+        ev = evt.get("event")
+        if ev == "phase":
+            self.ready_log.write(f"— {evt['label']} —", "head")
+            self._set_status(evt["label"])
+        elif ev == "check":
+            self.ready_log.write(f"{'✓' if evt['ok'] else '✗'} {evt['name']}: {evt['detail']}",
+                                 "ok" if evt["ok"] else "err")
+        elif ev == "phase_done" and evt.get("name") == "compliance":
+            self.ready_log.write(f"   compliance: {evt['passed']}/{evt['total']} checks passed",
+                                 "ok" if evt["passed"] == evt["total"] else "err")
+        elif ev == "sweep":
+            r = evt["row"]
+            tag = "ovl" if r["overload"] else ("odd" if len(self._rd_rows) % 2 else "even")
+            label = f"{r['conc']}{'⁺' if r['overload'] else ''}"
+            self.ready_tree.insert(
+                "", "end", tags=(tag,),
+                values=(label, f"{r['out_tps']:.0f}", f"{r['ttft_p95']:.2f}s",
+                        f"{r['tpot_ms']:.0f}" if r['tpot_ms'] > 0 else "–",
+                        f"{r['success']}/{r['requests']}",
+                        f"{r['rejected']}", f"{r['hard_err']}"))
+            self.ready_tree.yview_moveto(1.0)
+            self._rd_rows.append(r)
+            self.ready_chart.plot(
+                [(f"c{x['conc']}", x["out_tps"]) for x in self._rd_rows],
+                title="output tok/s vs concurrency", unit="tok/s")
+            peak = max(x["out_tps"] for x in self._rd_rows)
+            self.ready_readout.configure(
+                text=f"Sweeping… c={label}: {r['out_tps']:.0f} out tok/s · "
+                     f"TTFT p95 {r['ttft_p95']:.2f}s · peak {peak:.0f} tok/s")
+
+    def _readiness_done(self, report: dict):
+        a = report["analysis"]
+        v = report["verdicts"]
+        orv, hfv = v["openrouter"]["verdict"], v["huggingface"]["verdict"]
+
+        def tone(text):
+            return (self.pal["live_ok"] if text.startswith("✅")
+                    else "#d0902a" if text.startswith("⚠") else self.pal["live_err"])
+        self.ready_readout.configure(
+            text=f"OpenRouter:  {orv}\nHuggingFace: {hfv}", text_color=tone(orv))
+
+        self.ready_log.write("✓ Provider-fit test complete", "ok")
+        self.ready_log.write(f"Bottleneck: {a['text']}",
+                             "ok" if a["type"] in ("healthy", "insufficient") else "err")
+
+        for prov, key in (("OpenRouter", "openrouter"), ("HuggingFace", "huggingface")):
+            info = v[key]
+            rows = [(g, "✓" if ok else "✗ missing") for g, ok in info["gates"].items()]
+            rows.append(("peak output tok/s", f"{a['peak_out_tps']:.0f} @ c={a['peak_conc']}"))
+            rows.append(("throughput knee", f"c={a['knee_conc']} "
+                         f"(TTFT p95 {a['ttft_p95_knee']:.2f}s)"))
+            rows.append(("admission control", a["admission"]))
+            self.ready_log.result(prov, info["verdict"], rows,
+                                  failed=not info["verdict"].startswith("✅"))
+
+        # Persist to History + comparison (value = peak output tok/s), like the
+        # Benchmark and Model-fit tabs.
+        conn = getattr(self, "_rd_conn", None)
+        if conn:
+            host, port, endpoint = conn
+            params = getattr(self, "_rd_params", {})
+            summary = (f"OR {orv[:2]} · HF {hfv[:2]} · {a['type']} · "
+                       f"peak {a['peak_out_tps']:.0f} tok/s @ c={a['peak_conc']}")
+            self._record_and_compare(
+                host, port, report.get("model", ""), endpoint, "readiness",
+                params, summary, self._readiness_history_rows(report),
+                value=a["peak_out_tps"], value_label="peak out tok/s")
+        self._set_status("Provider-fit test complete.")
+
+    @staticmethod
+    def _readiness_history_rows(report: dict) -> list:
+        """Flat (label, value) rows persisted to History for run-over-run compare."""
+        a = report["analysis"]
+        v = report["verdicts"]
+        rows = [
+            ("OpenRouter", v["openrouter"]["verdict"]),
+            ("HuggingFace", v["huggingface"]["verdict"]),
+            ("bottleneck", a["type"]),
+            ("admission control", a["admission"]),
+            ("peak out tok/s", f"{a['peak_out_tps']:.0f} @ c={a['peak_conc']}"),
+            ("throughput knee", f"c={a['knee_conc']}"),
+            ("scale (c1→top)", f"×{a['scale']:.1f}"),
+            ("TTFT p95 @ knee", f"{a['ttft_p95_knee']:.2f}s"),
+        ]
+        for c in report["compliance"]:
+            rows.append((c["name"], "✓" if c["ok"] else "✗"))
+        return rows
 
     def _build_scan_tab(self):
         sec, top = self._section(self.tab_scan, "Scan settings")
@@ -1653,7 +2111,9 @@ class App:
 
     def _on_cancelled(self):
         self._set_status("Cancelled.")
-        for log in (getattr(self, "bench_log", None), getattr(self, "opt_log", None), getattr(self, "soak_log", None)):
+        for log in (getattr(self, "bench_log", None), getattr(self, "opt_log", None),
+                    getattr(self, "soak_log", None), getattr(self, "fit_log", None),
+                    getattr(self, "ready_log", None)):
             if log is not None:
                 log.write("✗ Cancelled by user", "err")
 
@@ -1666,7 +2126,7 @@ class App:
         self._busy = busy
         state = "disabled" if busy else "normal"
         for b in (self.btn_detect, self.btn_models, self.btn_run, self.btn_scan,
-                  self.btn_opt, self.btn_soak):
+                  self.btn_opt, self.btn_soak, self.btn_fit):
             b.configure(state=state)
         # Cancel buttons are the inverse: only usable while a task is running.
         for b in self._cancel_btns:
@@ -1689,7 +2149,8 @@ class App:
 
     def _error(self, err: Exception):
         self._set_status(f"Error: {err}")
-        for log in (getattr(self, "bench_log", None), getattr(self, "opt_log", None), getattr(self, "soak_log", None)):
+        for log in (getattr(self, "bench_log", None), getattr(self, "opt_log", None),
+                    getattr(self, "soak_log", None), getattr(self, "fit_log", None)):
             if log is not None:
                 log.write(f"✗ {err}", "err")
         messagebox.showerror(APP_TITLE, str(err))

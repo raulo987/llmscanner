@@ -32,6 +32,8 @@ RELEVANT = {
     "prefix": ["ctx"],
     "determinism": ["tokens", "runs"],
     "limits": ["ctx", "ctx_probe"],
+    "model-fit": ["dims"],
+    "readiness": ["sweep_levels", "in", "out"],
 }
 
 

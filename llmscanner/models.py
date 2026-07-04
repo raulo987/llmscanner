@@ -40,3 +40,4 @@ class RequestResult:
     error: str = ""
     text: str = ""
     est_tokens: bool = False        # token counts estimated (server sent no usage)
+    finish_reason: str = ""         # "stop" / "length" / "" — why generation ended
