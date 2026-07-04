@@ -97,7 +97,19 @@ pip install -e '.[cli]'
 python -m llmscanner
 # või kui pakett on paigaldatud:
 llmscanner
+# või ilma eelnevate sammudeta (loob venv + install esimesel korral):
+./run.sh
 ```
+
+**Iseseisev macOS executable (Python pole vaja):**
+
+```bash
+./build_macos.sh          # ehitab dist/LLMScanner — üks fail, bundleb Pythoni + Tk
+open dist/LLMScanner      # käivita (või topeltklõps Finderis)
+```
+
+`build_macos.sh` kasutab PyInstalleri `--onefile` režiimi ja koondab customtkinteri
+teemad; ikoon genereeritakse programmiliselt (pilte pole vaja kaasa panna).
 
 **Käsurida (boonus):**
 
@@ -352,21 +364,51 @@ OpenRouteri / HuggingFace inference-liiklust**, ja **kus ta esimesena katki läh
 
 Kiired üksik-proovid, igaüks vastab ühele kõvale nõudele, mille router serverile esitab (✓/✗):
 
-- **Chat endpoint** — `/v1/chat/completions` tagastab vastuse.
-- **Streaming (SSE)** — vastus tuleb token-haaval (TTFT < koguaeg), mitte puhverdatult.
-- **Usage-arvestus** — server tagastab prompt/completion tokenite arvu. Routerid **arveldavad selle
-  järgi**, seega puuduv usage-blokk on OpenRouteri jaoks blokeeriv.
+- **Chat endpoint** — `/v1/chat/completions` tagastab vastuse (OpenAI-ühilduvus).
+- **Streaming (SSE)** — vastus tuleb token-haaval (TTFT < koguaeg), mitte puhverdatult. OpenRouter:
+  *"stream tokens immediately rather than queueing"*.
+- **Usage-arvestus** — server tagastab prompt/completion tokenite arvu. Vajalik täpseks token-põhiseks
+  arvestuseks/throughput'iks (routerite lubatud parameeter), kuigi pole rangelt provideri-nõue.
 - **max_tokens** — genereerimine peatub limiidil; **finish_reason=length** katkestusel.
-- **Stop-järjestused** — `stop` parameetrit järgitakse.
+- **Stop-järjestused** — `stop` parameetrit järgitakse (OpenRouteri lubatud parameeter).
 - **Determinism (temp 0)** — sama prompt annab identse väljundi (greedy dekodeerimine).
 - **Sampling-parameetrid** — temperature/top_p/seed **päriselt rakenduvad** (erinev seed → erinev väljund).
 - **Concurrent-korrektsus** — paralleelne päringu-puhang õnnestub tervikuna.
-- **Puhtad veakoodid** — vigane päring saab 4xx JSON-vea, mitte 5xx / rippumise.
+- **Puhtad veakoodid** — vigane päring saab 4xx JSON-vea, mitte 5xx / rippumise (OpenRouteri uptime-reeglid:
+  400 ei lähe uptime'i vastu, 500+ läheb).
+- **Auth-jõustamine** — tahtlikult vale API-võtmega päring saab 401/403. Avatud otspunkt (vale võti
+  aktsepteeritud) on lokaalses arenduses OK, aga mitte live-provideri jaoks → mitte-kriitiline värav.
+- **Tool calling** — Hermes-stiilis tööriista-kutsed. **HF valideerimine testib LLM-idel tool-calling'ut.**
+- **Structured output** — nõutud JSON-kuju parse'ub + vastab skeemile. **HF testib structured-output'i.**
+- **/v1/models metadata** — `context_length` (+ pricing) on avaldatud. Mõlemad routerid loevad neid
+  `/v1/models`-ist (OpenRouteri model-spec; HF `:fastest`/`:cheapest` valik).
 
-### 2. Paralleelsuse sweep — pudelikaela otsing
+### 2. Aususe-testid (integrity) — *"kas kontrollimatu kolmas osapool petab meid või kasutajaid"*
+
+Adversariaalsed proovid, mida router ajaks backendi peal, mida ta ise ei halda:
+
+- **Token-loenduse ausus** — sunnib teadaoleva väljundpikkuse (`ignore_eos`) ja võrdleb serveri
+  raporteeritud `completion_tokens`-i tekstist tuletatud tokenizer-agnostilise hinnanguga. Kõrge
+  suhe = **arve-täitmine (billing inflation)**. See on OpenRouteri jaoks **kõva blokk** (router
+  arveldab tokenite järgi → üle-lugemine petab kasutajaid otse).
+- **Konteksti-ausus** — peidab koodi pikka prompti (needle-in-haystack) mitmel sügavusel serveri
+  reklaamitud limiidi lähedal ja küsib tagasi. Kukub, kui server **vaikselt kärbib** või lubatud
+  kontekst pole päris.
+- **Mudeli kvaliteet / autentsus** — golden-answer eval (faktid/matemaatika/loogika). Vaikselt
+  **kvantitud / vale / katkine mudel** kukub need. *Pole lõplik kvant-detektor, vaid esimene
+  kvaliteedi-põrand, mida router enne usaldamist ajaks.*
+- **Kliendi-katkestuse käitlus** — mõõdab probe-TTFT, ujutab serveri üle mitme pika päringuga, mis
+  **katkestavad ühenduse esimese tokeni järel** (nagu router teeb, kui kasutaja tühistab), ja mõõdab
+  probe-TTFT uuesti. Kui server vabastas slotid → kiire; kui jätkas hüljatud päringute genereerimist →
+  probe jääb järjekorda. *Informatiivne (ajastus-tundlik), aga suur hüpe on päris ohumärk.*
+- **Logprob-fingerprint** — mudeli enesekindlus triviaalsel faktil (proxy täpsusele; informatiivne,
+  paljud serverid ei avalda logprobe).
+
+### 3. Paralleelsuse sweep — pudelikaela otsing
 
 Käib läbi paralleelsuse tasemed (nt 1,4,8,16,32) realistliku päringukujuga ja mõõdab igal tasemel
-väljund-tok/s, TTFT p95, TPOT (aeg väljund-tokeni kohta), req/s ja **429/503 vs kõvad vead**. Sellest
+väljund-tok/s, TTFT **p95 ja p99** (saba-latents), lõpp-latentsi p99, TPOT (aeg väljund-tokeni kohta),
+req/s ja **429/503 vs kõvad vead**. Sellest
 tuletatakse:
 
 - **Läbilaskevõime põlv (knee)** — paralleelsus, kus tok/s lakkab kasvamast (jätkusuutlik lagi).
@@ -376,14 +418,33 @@ tuletatakse:
   - **Dekodeerimise-piir** — TPOT tõuseb koormuse all → KV-cache / mäluriba surve dekodeerimis-batchis.
   - **Batching puudub** — tok/s ei skaleeru paralleelsusega (üks päring küllastab juba GPU); halb TGI-stiilis
     läbilaskevõimele.
-  - **Admission control** — ülekoormuse proovik (+25%) lükatakse puhtalt tagasi (429/503) → korralik
-    backpressure routeri jaoks.
   - **Katki koormuse all** — kõvad vead / timeout'id puhaste tagasilükete asemel.
 
-**Verdikt** kummalegi pakkujale eraldi (nende rõhuasetused erinevad): **OpenRouter** nõuab
-usage-arvestust, stop/max_tokens järgimist, TTFT p95 ≤ SLA põlve juures ja puhast admission control'i;
-**HuggingFace / TGI** rõhub läbilaskevõimel, seega **batching peab skaleeruma (≥1.5×)**. Tulemus salvestub
-History-sse (tipp-tok/s), nii et näed jooksude-vahelist muutust.
+**Admission control** hinnatakse eraldi dimensioonina ülekoormuse-proovikust (+25%): puhas tagasilükkamine
+(429/503) vs katkiminek vs vaikne neelamine. OpenRouter nõuab sõna-sõnalt *"return early 429s if under
+load, rather than queueing requests"*.
+
+**Verdikt** kummalegi pakkujale eraldi (rõhuasetused erinevad):
+- **OpenRouter** — streaming, usage, **token-loenduse ausus** (kõva blokk), stop/max_tokens,
+  auth-jõustamine, `/v1/models` metadata, **konteksti-ausus + mudeli kvaliteet**, puhtad vead,
+  **TTFT p95 ≤ SLA ja p99 ≤ 2×SLA** põlve juures, stabiilsus koormuse all.
+- **HuggingFace / TGI** — streaming, concurrency, `/v1/models` metadata, **TTFT < 5 s** (HF dokumenteeritud
+  lävi, single-call streaming), **tool-calling + structured-output** (HF valideerib mõlemat),
+  **konteksti-ausus + mudeli kvaliteet**, ja läbilaskevõime — **batching peab skaleeruma (≥1.5×)**.
+
+Tulemus salvestub History-sse (tipp-tok/s), nii et näed jooksude-vahelist muutust.
+
+> **Märkus allika kohta:** compliance-kontrollid on vastavuses OpenRouteri
+> ([provider integration](https://openrouter.ai/docs/guides/community/for-providers)) ja HF
+> ([register-as-a-provider](https://huggingface.co/docs/inference-providers/en/register-as-a-provider))
+> dokumentatsiooniga. **Pudelikaela-taksonoomia (prefill/decode/queue/batching) on aga selle tööriista
+> oma analüütiline raamistik** — põhjendatud sellega, kuidas vLLM/TGI päriselt töötavad, mitte otsene
+> nõue routerite dokumentidest (OpenRouter avaldab avalikult ainult TTFT-d ja throughput'i).
+
+> **Mida inference-API kaudu EI saa kontrollida (ausalt):** *no-charge-on-error* (kas ebaõnnestunud
+> päringut ei arveldata) nõuab routeri billing-API-t, mitte ainult inference-otspunkti; ja **päris
+> kvantimise-fingerprint** nõuaks referents-logprobe iga mudeli kohta (meil on ainult enesekindluse
+> proxy). Need jäävad teadlikult katmata.
 
 ## Kuidas see töötab
 

@@ -263,6 +263,20 @@ INFO = {
         "TTFT p95 target in seconds. A provider verdict counts TTFT as passing when the "
         "95th-percentile time-to-first-token AT THE THROUGHPUT KNEE stays under this. "
         "Routers care about first-token latency; 2–3s is a reasonable local target."),
+    "rd_ctx": (
+        "How deep to probe context honesty (tokens). Hides a secret code at several "
+        "depths in a prompt of this size and asks for it back — catches a server that "
+        "silently truncates or whose advertised context length isn't real. Capped to "
+        "the server's advertised max when it exposes one."),
+    "rd_integrity": (
+        "Adversarial honesty probes a router runs on a backend it doesn't control:\n"
+        "• Token-count honesty — forces a known output length and compares the server's "
+        "reported completion_tokens against the actual text; catches billing inflation.\n"
+        "• Context honesty — needle-in-a-haystack recall (see Context probe).\n"
+        "• Model quality — a golden-answer eval; a silently quantised / wrong / broken "
+        "model drops these.\n"
+        "• Logprob fingerprint — the model's confidence on a trivial fact (informational; "
+        "many servers don't expose logprobs)."),
     "rd_overload": (
         "After the sweep, run one extra level 25% above the top concurrency to test "
         "admission control: a router-grade backend rejects the excess cleanly with "
@@ -1581,8 +1595,10 @@ class App:
         self.var_rd_sweep = tk.StringVar(value="1,4,8,16,32")
         self.var_rd_reqs = tk.StringVar(value="16")
         self.var_rd_sla = tk.StringVar(value="3")
+        self.var_rd_ctx = tk.StringVar(value="8192")
         self.var_rd_overload = tk.BooleanVar(value=True)
         self.var_rd_distinct = tk.BooleanVar(value=True)
+        self.var_rd_integrity = tk.BooleanVar(value=True)
 
         sec, top = self._section(self.tab_ready,
                                  "Provider fit — OpenRouter / HuggingFace readiness")
@@ -1605,13 +1621,19 @@ class App:
         field(2, 0, "Concurrency sweep", self.var_rd_sweep, INFO["rd_sweep"], w=150)
         field(2, 2, "Requests / level", self.var_rd_reqs, INFO["rd_reqs"])
         field(3, 0, "TTFT p95 SLA (s)", self.var_rd_sla, INFO["rd_sla"])
+        field(3, 2, "Context probe (tok)", self.var_rd_ctx, INFO["rd_ctx"])
+        fr0 = ctk.CTkFrame(top, fg_color="transparent")
+        fr0.grid(row=4, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
+        ctk.CTkCheckBox(fr0, text="Integrity probes — token-count honesty, context recall, model quality",
+                        variable=self.var_rd_integrity).pack(side="left")
+        self._info_icon(fr0, "Integrity probes", INFO["rd_integrity"]).pack(side="left", padx=(5, 0))
         fr = ctk.CTkFrame(top, fg_color="transparent")
-        fr.grid(row=4, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
+        fr.grid(row=5, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
         ctk.CTkCheckBox(fr, text="Overload probe (+25%) — check clean admission control",
                         variable=self.var_rd_overload).pack(side="left")
         self._info_icon(fr, "Overload probe", INFO["rd_overload"]).pack(side="left", padx=(5, 0))
         fr2 = ctk.CTkFrame(top, fg_color="transparent")
-        fr2.grid(row=5, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
+        fr2.grid(row=6, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
         ctk.CTkCheckBox(fr2, text="Distinct request prefixes (spread across backends)",
                         variable=self.var_rd_distinct).pack(side="left")
         self._info_icon(fr2, "Distinct request prefixes", INFO["rd_distinct"]).pack(side="left", padx=(5, 0))
@@ -1671,6 +1693,8 @@ class App:
                 "levels": levels,
                 "reqs_per_level": max(1, int(self.var_rd_reqs.get())),
                 "ttft_sla_s": max(0.1, float(self.var_rd_sla.get())),
+                "ctx_probe_tokens": max(256, int(self.var_rd_ctx.get())),
+                "integrity": bool(self.var_rd_integrity.get()),
                 "overload": bool(self.var_rd_overload.get()),
                 "distinct_prefix": bool(self.var_rd_distinct.get()),
                 "timeout": float(self.var_timeout.get() or 95),
@@ -1707,6 +1731,8 @@ class App:
                                  reqs_per_level=cfg["reqs_per_level"],
                                  ttft_sla_s=cfg["ttft_sla_s"], overload=cfg["overload"],
                                  distinct_prefix=cfg["distinct_prefix"],
+                                 ctx_probe_tokens=cfg["ctx_probe_tokens"],
+                                 integrity=cfg["integrity"],
                                  on_progress=on_progress),
             self._readiness_done, status="Provider-fit test running…")
 
@@ -1718,8 +1744,8 @@ class App:
         elif ev == "check":
             self.ready_log.write(f"{'✓' if evt['ok'] else '✗'} {evt['name']}: {evt['detail']}",
                                  "ok" if evt["ok"] else "err")
-        elif ev == "phase_done" and evt.get("name") == "compliance":
-            self.ready_log.write(f"   compliance: {evt['passed']}/{evt['total']} checks passed",
+        elif ev == "phase_done":
+            self.ready_log.write(f"   {evt['name']}: {evt['passed']}/{evt['total']} checks passed",
                                  "ok" if evt["passed"] == evt["total"] else "err")
         elif ev == "sweep":
             r = evt["row"]
@@ -1756,12 +1782,28 @@ class App:
         self.ready_log.write(f"Bottleneck: {a['text']}",
                              "ok" if a["type"] in ("healthy", "insufficient") else "err")
 
+        integ = report.get("integrity")
+        if integ:
+            tok = integ.get("token_honesty", {})
+            tok_flag = ("⚠ inflation" if tok.get("ok") is False
+                        else "n/a" if tok.get("ok") is None else "honest")
+            q = integ.get("quality", {})
+            cx = integ.get("context_honesty", {})
+            self.ready_log.write(
+                f"Integrity: tokens {tok_flag} · quality {q.get('score', 0) * 100:.0f}% · "
+                f"context {cx.get('passed', 0)}/{cx.get('total', 0)}",
+                "ok" if (tok.get("ok") is not False and q.get("ok", True) and cx.get("ok", True))
+                else "err")
+
         for prov, key in (("OpenRouter", "openrouter"), ("HuggingFace", "huggingface")):
             info = v[key]
             rows = [(g, "✓" if ok else "✗ missing") for g, ok in info["gates"].items()]
             rows.append(("peak output tok/s", f"{a['peak_out_tps']:.0f} @ c={a['peak_conc']}"))
             rows.append(("throughput knee", f"c={a['knee_conc']} "
                          f"(TTFT p95 {a['ttft_p95_knee']:.2f}s)"))
+            rows.append(("TTFT p95 / p99 @ knee",
+                         f"{a['ttft_p95_knee']:.2f}s / {a.get('ttft_p99_knee', 0):.2f}s"))
+            rows.append(("latency p99 @ knee", f"{a.get('lat_p99_knee', 0):.2f}s"))
             rows.append(("admission control", a["admission"]))
             self.ready_log.result(prov, info["verdict"], rows,
                                   failed=not info["verdict"].startswith("✅"))
@@ -1794,7 +1836,17 @@ class App:
             ("throughput knee", f"c={a['knee_conc']}"),
             ("scale (c1→top)", f"×{a['scale']:.1f}"),
             ("TTFT p95 @ knee", f"{a['ttft_p95_knee']:.2f}s"),
+            ("TTFT p99 @ knee", f"{a.get('ttft_p99_knee', 0):.2f}s"),
+            ("latency p99 @ knee", f"{a.get('lat_p99_knee', 0):.2f}s"),
         ]
+        integ = report.get("integrity", {})
+        if integ:
+            tok = integ.get("token_honesty", {})
+            rows.append(("token honesty", tok.get("detail", "—")))
+            rows.append(("context honesty", integ.get("context_honesty", {}).get("detail", "—")))
+            rows.append(("model quality", integ.get("quality", {}).get("detail", "—")))
+            rows.append(("cancellation", integ.get("cancellation", {}).get("detail", "—")))
+            rows.append(("logprob", integ.get("logprob", {}).get("detail", "—")))
         for c in report["compliance"]:
             rows.append((c["name"], "✓" if c["ok"] else "✗"))
         return rows

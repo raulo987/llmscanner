@@ -11,6 +11,21 @@ from .models import RequestResult
 from .util import Target, approx_tokens
 
 
+def _collect_logprobs(lp, out: list) -> None:
+    """Pull per-token logprobs out of a chunk's `logprobs` object, in both the
+    chat form ({"content": [{"logprob": ...}]}) and the completions form
+    ({"token_logprobs": [...]}). No-op when the server sends none."""
+    if not isinstance(lp, dict):
+        return
+    for it in (lp.get("content") or []):
+        v = it.get("logprob") if isinstance(it, dict) else None
+        if isinstance(v, (int, float)):
+            out.append(float(v))
+    for v in (lp.get("token_logprobs") or []):
+        if isinstance(v, (int, float)):
+            out.append(float(v))
+
+
 class LLMClient:
     """Talks to an OpenAI-compatible /v1 endpoint and measures speed.
 
@@ -52,6 +67,17 @@ class LLMClient:
             data = r.json()
             return [m.get("id", "?") for m in data.get("data", [])]
 
+    async def list_models_raw(self) -> list:
+        """Return the raw /v1/models entries (dicts), for inspecting the metadata
+        routers require (pricing, context_length). [] on any failure."""
+        try:
+            async with self._http() as c:
+                r = await c.get(f"{self.base_url}/v1/models", headers=self._headers())
+                r.raise_for_status()
+                return r.json().get("data", []) or []
+        except Exception:
+            return []
+
     async def model_max_len(self, model: Optional[str] = None) -> Optional[int]:
         """Return the server-advertised max context length, if exposed.
 
@@ -76,7 +102,7 @@ class LLMClient:
         return None
 
     def _payload(self, model, prompt, max_tokens, temperature, system, include_usage,
-                 force_output=False, stop=None, top_p=None, seed=None):
+                 force_output=False, stop=None, top_p=None, seed=None, logprobs=False):
         if self.endpoint == "completions":
             url = f"{self.base_url}/v1/completions"
             payload = {
@@ -108,6 +134,14 @@ class LLMClient:
             payload["top_p"] = top_p
         if seed is not None:
             payload["seed"] = seed
+        if logprobs:
+            # Ask for per-token logprobs to fingerprint the model's confidence.
+            # Chat and completions spell this differently.
+            if self.endpoint == "completions":
+                payload["logprobs"] = 1
+            else:
+                payload["logprobs"] = True
+                payload["top_logprobs"] = 1
         if force_output:
             # Force exactly `max_tokens` of decoding: ignore an early end-of-text
             # and require the full length. Without this a model often stops after
@@ -124,7 +158,7 @@ class LLMClient:
     async def generate(self, *, model: str, prompt: str, max_tokens: int = 128,
                        temperature: float = 0.0, system: Optional[str] = None,
                        force_output: bool = False, stop=None, top_p: Optional[float] = None,
-                       seed: Optional[int] = None) -> RequestResult:
+                       seed: Optional[int] = None, logprobs: bool = False) -> RequestResult:
         """Stream one completion and return timing/throughput metrics.
 
         `force_output` requests exactly `max_tokens` of output (ignore_eos /
@@ -143,7 +177,7 @@ class LLMClient:
                     model=model, prompt=prompt, max_tokens=max_tokens,
                     temperature=temperature, system=system,
                     include_usage=iu, force_output=fo,
-                    stop=stop, top_p=top_p, seed=seed,
+                    stop=stop, top_p=top_p, seed=seed, logprobs=logprobs,
                 )
             except httpx.HTTPStatusError as e:
                 code = e.response.status_code
@@ -164,17 +198,51 @@ class LLMClient:
                 return RequestResult(ok=False, error=f"{type(e).__name__}: {e}")
         return RequestResult(ok=False, error="unreachable")
 
+    async def stream_abort(self, *, model: str, prompt: str, max_tokens: int = 512) -> bool:
+        """Open a streaming completion, read until the first token, then disconnect
+        (close the connection) — simulating a client cancel mid-generation. Returns
+        True if a token arrived before we aborted. Used to test whether the server
+        frees the slot on disconnect (a router cancels aborted user requests)."""
+        url, payload = self._payload(model, prompt, max_tokens, 0.0, None, False)
+        headers = {**self._headers(), "Accept": "text/event-stream"}
+        try:
+            async with self._http() as c:
+                async with c.stream("POST", url, headers=headers, json=payload) as resp:
+                    if resp.status_code >= 400:
+                        await resp.aread()
+                        return False
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            obj = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        ch = (obj.get("choices") or [{}])[0]
+                        piece = (ch.get("delta") or {}).get("content") or ch.get("text") or ""
+                        if piece:
+                            # First token in hand — break out; leaving the `async with`
+                            # closes the connection, which is the client disconnect.
+                            return True
+            return False
+        except Exception:
+            return False
+
     async def _stream_once(self, *, model, prompt, max_tokens, temperature,
                            system, include_usage, force_output=False,
-                           stop=None, top_p=None, seed=None) -> RequestResult:
+                           stop=None, top_p=None, seed=None, logprobs=False) -> RequestResult:
         url, payload = self._payload(model, prompt, max_tokens, temperature, system,
                                      include_usage, force_output=force_output,
-                                     stop=stop, top_p=top_p, seed=seed)
+                                     stop=stop, top_p=top_p, seed=seed, logprobs=logprobs)
         start = time.perf_counter()
         first: Optional[float] = None
         chunks = 0
         usage = None
         finish_reason = ""
+        logprob_vals: list[float] = []
         parts: list[str] = []
 
         # Ask explicitly for an SSE stream — some gateways only stream token-by-token
@@ -199,6 +267,7 @@ class LLMClient:
                         piece = (ch.get("message") or {}).get("content") or ch.get("text") or ""
                         if ch.get("finish_reason"):
                             finish_reason = ch["finish_reason"]
+                        _collect_logprobs(ch.get("logprobs"), logprob_vals)
                         if piece:
                             parts.append(piece)
                     # leave chunks=0 / first=None → handled as a non-streamed result below
@@ -221,6 +290,7 @@ class LLMClient:
                         ch = choices[0]
                         if ch.get("finish_reason"):
                             finish_reason = ch["finish_reason"]
+                        _collect_logprobs(ch.get("logprobs"), logprob_vals)
                         if "delta" in ch:
                             piece = (ch.get("delta") or {}).get("content") or ""
                         else:
@@ -262,4 +332,6 @@ class LLMClient:
             text=text,
             est_tokens=est_tokens,
             finish_reason=finish_reason,
+            stream_chunks=chunks,
+            logprob_avg=(sum(logprob_vals) / len(logprob_vals)) if logprob_vals else None,
         )

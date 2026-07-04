@@ -41,3 +41,5 @@ class RequestResult:
     text: str = ""
     est_tokens: bool = False        # token counts estimated (server sent no usage)
     finish_reason: str = ""         # "stop" / "length" / "" — why generation ended
+    stream_chunks: int = 0          # content-bearing SSE chunks — independent token count
+    logprob_avg: Optional[float] = None  # mean logprob of generated tokens (None if unavailable)

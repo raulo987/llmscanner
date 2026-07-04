@@ -13,6 +13,7 @@ from typing import Callable, Optional
 
 from .client import LLMClient
 from .models import RequestResult
+from .util import approx_tokens
 
 # A prompt that strongly encourages the model to keep generating, so that
 # throughput numbers reflect real decode speed (not an early EOS).
@@ -66,6 +67,8 @@ class LoadStats:
     latency_p50: float
     latency_p95: float
     per_request_tps_mean: float
+    ttft_p99: float = 0.0
+    latency_p99: float = 0.0
     total_prompt_tokens: int = 0
     input_tps: float = 0.0          # prompt (input) tokens / wall — prefill/ingest rate
     total_tps: float = 0.0          # (prompt + completion) tokens / wall — total work rate
@@ -182,8 +185,10 @@ async def load(client: LLMClient, model: str, *, concurrency: int = 8,
         aggregate_tps=total_ctoks / wall if wall else 0.0,
         ttft_p50=_pct(ttfts, 0.5),
         ttft_p95=_pct(ttfts, 0.95),
+        ttft_p99=_pct(ttfts, 0.99),
         latency_p50=_pct(lats, 0.5),
         latency_p95=_pct(lats, 0.95),
+        latency_p99=_pct(lats, 0.99),
         per_request_tps_mean=statistics.mean(tpss) if tpss else 0.0,
         total_prompt_tokens=total_ptoks,
         # Input, output and total token throughput are all aggregate rates over the
@@ -1269,9 +1274,198 @@ async def _readiness_compliance(client: LLMClient, model: str,
         (r.error[:60] if not r.ok else "accepted an invalid model — no validation"),
         "returns a 4xx JSON error, not 5xx / timeout")
 
+    # 11. Tool calling — HuggingFace explicitly runs a tool-calling behavioural
+    #     test on LLMs before listing a provider (register-as-a-provider docs).
+    tool_pos = [c for c in _TOOL_CASES if c["tool"]][:3]
+    thits = 0
+    for c in tool_pos:
+        r = await one(c["user"], 256, temperature=0.0, system=_HERMES_SYSTEM)
+        calls = _extract_tool_calls(r.text) if r.ok else []
+        if calls and calls[0][0] == c["tool"]:
+            thits += 1
+    tool_ok = thits >= max(1, len(tool_pos) - 1)   # allow one miss
+    add("Tool calling", tool_ok, f"{thits}/{len(tool_pos)} correct Hermes tool calls",
+        "HF runs a tool-calling test on LLMs")
+
+    # 12. Structured output — HuggingFace also runs a structured-output test.
+    json_cases = _JSON_CASES[:2]
+    jhits = 0
+    for c in json_cases:
+        r = await one(c["user"], 384, temperature=0.0, system=_JSON_SYSTEM)
+        obj = None
+        if r.ok:
+            try:
+                obj = json.loads(_strip_fences(r.text))
+            except Exception:
+                obj = None
+        if obj is not None and _json_schema_ok(obj, c):
+            jhits += 1
+    add("Structured output", jhits >= 1, f"{jhits}/{len(json_cases)} valid JSON schemas",
+        "HF runs a structured-output test on LLMs")
+
+    # 13. /v1/models metadata — both routers read pricing + context_length from
+    #     /v1/models (OpenRouter model spec; HF :fastest/:cheapest selection).
+    #     Locally, pricing is a router-side concern, so the pass condition is the
+    #     context-length field servers actually expose; pricing is reported too.
+    metas = await client.list_models_raw()
+    meta = next((x for x in metas if x.get("id") == model), None) or (metas[0] if metas else {})
+    ctx_keys = ("context_length", "max_model_len", "max_context_length",
+                "max_seq_len", "max_position_embeddings")
+    has_ctx = any(isinstance(meta.get(k), int) and meta[k] > 0 for k in ctx_keys)
+    has_price = ("pricing" in meta) or ("price" in meta)
+    add("/v1/models metadata", has_ctx,
+        f"context_length {'✓' if has_ctx else '✗'} · pricing {'✓' if has_price else '✗ (router-side)'}",
+        "expose context_length (+ pricing) via /v1/models")
+
+    # 14. Auth enforcement — a provider endpoint routed public traffic must gate
+    #     access by API key. Hit it with a deliberately-wrong key and expect a
+    #     401/403. An open endpoint (bad key accepted) is fine for local dev but
+    #     not for a live provider, so this is a non-critical gate.
+    bad = LLMClient(client.host, client.port, api_key="llmscanner-invalid-key-9z9z9z",
+                    scheme=client.scheme, base_path=client.base_path,
+                    endpoint=client.endpoint, timeout=min(client.timeout, 20.0))
+    ra = await bad.generate(model=model, prompt="hi", max_tokens=4)
+    enforced = (not ra.ok) and any(ra.error.startswith(f"HTTP {c}") for c in ("401", "403"))
+    if enforced:
+        adetail = "bad API key rejected (401/403)"
+    elif ra.ok:
+        adetail = "OPEN — a bad API key was accepted (no auth enforced)"
+    else:
+        adetail = f"inconclusive: {ra.error[:50]}"
+    add("Auth enforced", enforced, adetail, "provider must gate access by API key")
+
     emit({"event": "phase_done", "name": "compliance",
           "passed": sum(1 for c in checks if c["ok"]), "total": len(checks)})
     return checks
+
+
+# Deterministic golden set for a quick quality floor — a genuinely-served,
+# full-precision model of any reasonable size answers these; a silently quantised,
+# distilled, wrong, or broken model starts dropping them. Not a definitive
+# quantisation detector, but the first-pass eval a router runs before trusting a
+# third-party backend's "quality".
+_GOLDEN_CASES = [
+    {"user": "What is the capital of France? Answer with one word.", "must": ["paris"]},
+    {"user": "What is 17 multiplied by 23? Answer with the number only.", "must": ["391"]},
+    {"user": "What is the chemical symbol for gold? Symbol only.", "must": ["au"]},
+    {"user": "How many days are in a normal (non-leap) year? Number only.", "must": ["365"]},
+    {"user": "What is the square root of 144? Number only.", "must": ["12"]},
+    {"user": "Who wrote the play Romeo and Juliet? Surname only.", "must": ["shakespeare"]},
+    {"user": "Continue the sequence with the next number: 2, 4, 8, 16. Number only.", "must": ["32"]},
+    {"user": "In what year did the Second World War end? Year only.", "must": ["1945"]},
+    {"user": "What is the boiling point of water in Celsius at sea level? Number only.", "must": ["100"]},
+    {"user": "Translate the phrase 'thank you' into French.", "must": ["merci"]},
+]
+
+
+async def _readiness_integrity(client: LLMClient, model: str,
+                               emit: Callable[[dict], None], *,
+                               ctx_probe_tokens: int = 8192, in_tokens: int = 1024) -> dict:
+    """Adversarial honesty probes a router runs on a backend it does not control:
+    is the reported token count honest (billing), is the advertised context real,
+    and is the served model actually at the claimed quality (not silently quantised)?"""
+    out: dict = {}
+    ct = [0, 0]  # [passed, total] for the phase summary
+
+    def add(name, ok, detail):
+        ct[1] += 1
+        ct[0] += 1 if ok else 0
+        emit({"event": "check", "name": name, "ok": bool(ok),
+              "detail": str(detail)[:90], "req": "integrity"})
+
+    async def one(prompt, max_tokens, **kw):
+        return await client.generate(model=model, prompt=prompt, max_tokens=max_tokens, **kw)
+
+    # 1. Token-count honesty — force a known output length, then compare the
+    #    server's reported completion_tokens against a tokenizer-agnostic estimate
+    #    from the actual text. A backend inflating counts to overbill shows a high
+    #    reported/actual ratio. Only checkable when the server reports usage.
+    r = await one(LONG_PROMPT, 128, force_output=True, temperature=0.0)
+    if not r.ok:
+        out["token_honesty"] = {"ok": False, "detail": r.error}
+        add("Token-count honesty", False, r.error)
+    elif r.est_tokens:
+        out["token_honesty"] = {"ok": None, "detail": "no usage block — cannot verify"}
+        add("Token-count honesty", True, "n/a — server sent no usage to verify")
+    else:
+        indep = approx_tokens(r.text)
+        ratio = r.completion_tokens / max(indep, 1)
+        inflated = ratio > 1.5
+        detail = (f"reported {r.completion_tokens} vs ~{indep} from text (×{ratio:.2f}); "
+                  f"{r.stream_chunks} stream chunks")
+        out["token_honesty"] = {"ok": not inflated, "ratio": ratio,
+                                "reported": r.completion_tokens, "text_est": indep,
+                                "chunks": r.stream_chunks, "detail": detail}
+        add("Token-count honesty", not inflated, detail)
+
+    # 2. Context honesty — hide a code deep in a long prompt near the advertised
+    #    limit and ask for it back. Fails if the server truncates silently or the
+    #    claimed context length isn't real.
+    advertised = await client.model_max_len(model)
+    size = min(ctx_probe_tokens, advertised) if advertised else ctx_probe_tokens
+    nd = await needle_test(client, model, ctx_tokens=size, depths=(0.1, 0.5, 0.9))
+    ctx_ok = nd["passed"] >= 2
+    detail = (f"recalled {nd['passed']}/{nd['total']} at ~{size} tok"
+              + (f" (server claims {advertised})" if advertised else ""))
+    out["context_honesty"] = {"ok": ctx_ok, "passed": nd["passed"], "total": nd["total"],
+                              "size": size, "advertised": advertised, "detail": detail}
+    add("Context honesty (recall)", ctx_ok, detail)
+
+    # 3. Model quality / authenticity — a golden-answer eval. A grossly degraded
+    #    (quantised/wrong/broken) model drops these.
+    hits = 0
+    for c in _GOLDEN_CASES:
+        rr = await one(c["user"], 24, temperature=0.0)
+        txt = (rr.text or "").lower()
+        if rr.ok and any(m in txt for m in c["must"]):
+            hits += 1
+    score = hits / len(_GOLDEN_CASES)
+    q_ok = score >= 0.7
+    out["quality"] = {"ok": q_ok, "score": score, "hits": hits, "total": len(_GOLDEN_CASES),
+                      "detail": f"{hits}/{len(_GOLDEN_CASES)} golden answers ({score * 100:.0f}%)"}
+    add("Model quality (golden eval)", q_ok, out["quality"]["detail"])
+
+    # 4. Logprob fingerprint — the model's confidence on a trivial fact is a proxy
+    #    for its precision; full-precision weights are very confident. Informational
+    #    (many servers don't expose logprobs), so it never fails the phase.
+    rr = await one("The capital of France is", 3, temperature=0.0, logprobs=True)
+    if rr.logprob_avg is not None:
+        p = math.exp(max(-20.0, rr.logprob_avg))
+        out["logprob"] = {"supported": True, "avg": rr.logprob_avg,
+                          "detail": f"mean logprob {rr.logprob_avg:.2f} (p≈{p:.2f}) on a trivial prompt"}
+        add("Logprob fingerprint", True, out["logprob"]["detail"])
+    else:
+        out["logprob"] = {"supported": False, "detail": "logprobs unsupported — cannot fingerprint"}
+        add("Logprob fingerprint", True, "logprobs unsupported (informational)")
+
+    # 5. Cancellation / disconnect handling — measure probe TTFT, saturate the
+    #    server with several long requests that disconnect after the first token,
+    #    then re-probe TTFT. If the server honoured the disconnects (freed the
+    #    slots, as it should when a router cancels a user's request), the probe
+    #    stays fast; if it kept generating the abandoned requests, the probe
+    #    queues behind them. Informational — timing-sensitive, so it never fails
+    #    the phase, but a large blow-up is a real red flag.
+    body = _filler(max(64, in_tokens // 4)) + "\n\nReply with the single word OK."
+    base = await one(body, 8, temperature=0.0)
+    if base.ok:
+        long_body = _filler(in_tokens) + "\n\nWrite an extremely long essay and keep going."
+        await asyncio.gather(*(client.stream_abort(model=model, prompt=f"[{i}] " + long_body,
+                                                   max_tokens=1024) for i in range(4)))
+        after = await one(body, 8, temperature=0.0)
+        t_base, t_after = base.ttft, (after.ttft if after.ok else 0.0)
+        ratio = t_after / max(t_base, 1e-3)
+        cancel_ok = bool(after.ok and ratio <= 3.0)
+        detail = (f"probe TTFT {t_base * 1000:.0f}ms → {t_after * 1000:.0f}ms after aborting 4 "
+                  f"streams (×{ratio:.1f})")
+        out["cancellation"] = {"ok": cancel_ok, "t_base": t_base, "t_after": t_after,
+                               "ratio": ratio, "detail": detail}
+        add("Cancellation handling", cancel_ok, detail)
+    else:
+        out["cancellation"] = {"ok": None, "detail": "baseline probe failed — skipped"}
+        add("Cancellation handling", True, "baseline probe failed — skipped")
+
+    emit({"event": "phase_done", "name": "integrity", "passed": ct[0], "total": ct[1]})
+    return out
 
 
 def _readiness_row(conc: int, stats: "LoadStats", *, overload: bool) -> dict:
@@ -1281,6 +1475,7 @@ def _readiness_row(conc: int, stats: "LoadStats", *, overload: bool) -> dict:
         "conc": conc, "overload": overload,
         "out_tps": stats.aggregate_tps, "in_tps": stats.input_tps,
         "total_tps": stats.total_tps, "ttft_p95": stats.ttft_p95,
+        "ttft_p99": stats.ttft_p99, "lat_p99": stats.latency_p99,
         "lat_p95": stats.latency_p95, "tpot_ms": stats.tpot_ms,
         "req_per_s": stats.req_per_s, "success": stats.success,
         "requests": stats.requests, "rejected": rej, "hard_err": hard,
@@ -1358,8 +1553,9 @@ def _readiness_analysis(rows: list) -> dict:
     return {
         "type": btype, "admission": admission, "text": (text + adm_txt).strip(),
         "peak_out_tps": peak, "peak_conc": peak_row["conc"], "knee_conc": knee["conc"],
-        "ttft_p95_knee": knee["ttft_p95"], "scale": scale, "ttft_growth": ttft_growth,
-        "tpot_growth": tpot_growth, "hard_frac_max": hard_max,
+        "ttft_p95_knee": knee["ttft_p95"], "ttft_p95_base": base["ttft_p95"], "scale": scale,
+        "ttft_p99_knee": knee.get("ttft_p99", 0.0), "lat_p99_knee": knee.get("lat_p99", 0.0),
+        "ttft_growth": ttft_growth, "tpot_growth": tpot_growth, "hard_frac_max": hard_max,
     }
 
 
@@ -1384,26 +1580,50 @@ def _readiness_verdicts(report: dict) -> dict:
     def has(name):
         return checks.get(name, False)
 
-    # OpenRouter: bills on usage, cares about correctness + TTFT + clean backpressure.
+    # Integrity (honesty) — token_honesty None means "couldn't verify" (no usage),
+    # which is not a failure; only an explicit False (inflation detected) fails.
+    integ = report.get("integrity", {})
+    tok_honest = integ.get("token_honesty", {}).get("ok") is not False
+    ctx_honest = integ.get("context_honesty", {}).get("ok", True)
+    quality_ok = integ.get("quality", {}).get("ok", True)
+
+    # OpenRouter: correctness + TTFT + clean backpressure; reads model metadata
+    # (pricing, context_length) from /v1/models; and — critically for a router
+    # billing on tokens — honest token counts.
     or_gates = {
         "Streaming (SSE)": has("Streaming (SSE)"),
         "Usage accounting": has("Usage accounting"),
+        "Token-count honesty": tok_honest,
         "max_tokens honored": has("max_tokens honored"),
         "Stop sequences": has("Stop sequences"),
         "Concurrent requests": has("Concurrent requests"),
         "Clean errors": has("Clean error on bad request"),
+        "Auth enforced": has("Auth enforced"),
+        "/v1/models metadata": has("/v1/models metadata"),
+        "Context honesty": ctx_honest,
+        "Model quality": quality_ok,
         "Stable under load": stable,
         f"TTFT p95 ≤ {sla:g}s @ knee": ttft_ok,
+        f"TTFT p99 ≤ {2 * sla:g}s @ knee": a["ttft_p99_knee"] <= 2 * sla,
     }
-    or_crit = has("Streaming (SSE)") and has("Usage accounting") and stable
+    # Token-count inflation is billing fraud → a hard block for a paying router.
+    or_crit = has("Streaming (SSE)") and has("Usage accounting") and stable and tok_honest
     or_frac = sum(1 for v in or_gates.values() if v) / len(or_gates)
 
-    # HuggingFace / TGI: throughput-serving, so batching-scaling is a first-class gate.
+    # HuggingFace / TGI: throughput-serving (batching-scaling), and HF's provider
+    # validation runs a documented TTFT < 5 s check plus tool-calling and
+    # structured-output behavioural tests on LLMs.
     hf_gates = {
         "Streaming (SSE)": has("Streaming (SSE)"),
         "Chat endpoint": has("Chat endpoint"),
         "max_tokens honored": has("max_tokens honored"),
         "Concurrent requests": has("Concurrent requests"),
+        "/v1/models metadata": has("/v1/models metadata"),
+        "TTFT < 5s (HF)": a["ttft_p95_base"] <= 5.0,
+        "Tool calling": has("Tool calling"),
+        "Structured output": has("Structured output"),
+        "Context honesty": ctx_honest,
+        "Model quality": quality_ok,
         "Stable under load": stable,
         "Batching scales (≥1.5×)": a["scale"] >= 1.5,
     }
@@ -1413,7 +1633,7 @@ def _readiness_verdicts(report: dict) -> dict:
     return {
         "openrouter": {"score": or_frac, "gates": or_gates,
                        "verdict": _rd_verdict(or_frac, or_crit, or_gates,
-                                              "voog / usage-arvestus / stabiilsus puudu")},
+                                              "voog / usage-arvestus / token-ausus / stabiilsus puudu")},
         "huggingface": {"score": hf_frac, "gates": hf_gates,
                         "verdict": _rd_verdict(hf_frac, hf_crit, hf_gates,
                                                "voog / concurrency / stabiilsus puudu")},
@@ -1425,6 +1645,7 @@ async def provider_readiness(client: LLMClient, model: Optional[str], *,
                              sweep_levels: tuple = (1, 4, 8, 16, 32),
                              reqs_per_level: int = 16, ttft_sla_s: float = 3.0,
                              overload: bool = True, distinct_prefix: bool = True,
+                             ctx_probe_tokens: int = 8192, integrity: bool = True,
                              on_progress: Optional[Callable[[dict], None]] = None) -> dict:
     """Grade a backend's fitness for OpenRouter / HuggingFace traffic and locate
     its first bottleneck. Streams progress via `on_progress(event)` and returns a
@@ -1450,7 +1671,13 @@ async def provider_readiness(client: LLMClient, model: Optional[str], *,
     emit({"event": "phase", "name": "compliance", "label": "API contract compliance"})
     report["compliance"] = await _readiness_compliance(client, model, emit)
 
-    # Phase 2 — concurrency sweep / bottleneck hunt.
+    # Phase 2 — integrity / honesty (billing, context, model quality).
+    if integrity:
+        emit({"event": "phase", "name": "integrity", "label": "Integrity — billing / context / quality"})
+        report["integrity"] = await _readiness_integrity(
+            client, model, emit, ctx_probe_tokens=ctx_probe_tokens, in_tokens=in_tokens)
+
+    # Phase 3 — concurrency sweep / bottleneck hunt.
     emit({"event": "phase", "name": "sweep", "label": "Concurrency sweep — bottleneck hunt"})
     levels = sorted({int(x) for x in sweep_levels if int(x) >= 1})
     rows: list = []
