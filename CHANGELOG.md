@@ -6,6 +6,17 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
+### 2026-07-06 (mööduva serveri-tõrke (5xx) automaatne kordamine proovidel)
+- **Võimekus-proovid (compliance / integrity / model-fit / recall) kordavad nüüd mööduva 5xx serveri-
+  tõrke (nt hetkeline 503 üle-koormus) või ühendus-/timeout-vea korral automaatselt** (kuni 2× väikese
+  backoff'iga). Varem võis serveri hetkeline hikk kukutada kogu testi (nt kõik tool-proovid → "HTTP 503"
+  → vale "EI SOBI"). **Koormus-/soak-tee EI korda** — seal on 503 just admission-control signaal, mida
+  mõõdame. Klient sai `generate(..., retries=N)` parameetri ja `_is_transient()` eristuse (5xx/ühendus-
+  viga korratav, 4xx mitte).
+- **Ebaõnnestunud tool-proovi detail hoiab nüüd KOGU serveri veateate** (varem kärbitud 60 tähega), nii
+  et Model-fit real topeltklõps näitab täielikku 503-vastust — vajalik server-poolse tõrke (nt katkine
+  tool-genereerimise tee) diagnoosimiseks. Klient püüab vea-keha nüüd 600 tähe ulatuses.
+
 ### 2026-07-06 (calculator-juhtumid eksplitsiitseks; klikk-avab-detaili)
 - **Model-fit tabelil topeltklõps real avab mudeli täis-prompti ja täis-detaili** eraldi aknas
   (tabeliveerud lõikavad pika teksti ära, nt "→ no tool call — model said: …").

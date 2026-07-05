@@ -1,11 +1,22 @@
 """Async client for OpenAI-compatible LLM servers, with timing."""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Optional
 
 import httpx
+
+
+def _is_transient(error: str) -> bool:
+    """A retriable failure — a 5xx server error (e.g. a momentary 503 overload) or a
+    connection/timeout error — as opposed to a 4xx client error that won't change."""
+    e = error or ""
+    if any(e.startswith(f"HTTP {c}") for c in ("500", "502", "503", "504")):
+        return True
+    return any(s in e for s in ("ConnectError", "ConnectTimeout", "ReadTimeout",
+                                "ReadError", "PoolTimeout", "WriteTimeout", "TimeoutException"))
 
 from .models import RequestResult
 from .util import Target, approx_tokens
@@ -201,7 +212,7 @@ class LLMClient:
                        temperature: float = 0.0, system: Optional[str] = None,
                        force_output: bool = False, stop=None, top_p: Optional[float] = None,
                        seed: Optional[int] = None, logprobs: bool = False,
-                       tools=None, tool_choice=None) -> RequestResult:
+                       tools=None, tool_choice=None, retries: int = 0) -> RequestResult:
         """Stream one completion and return timing/throughput metrics.
 
         `force_output` requests exactly `max_tokens` of output (ignore_eos /
@@ -210,7 +221,27 @@ class LLMClient:
         the provider-readiness contract checks). `tools` (OpenAI function-calling
         schema list) / `tool_choice` are forwarded as-is; any tool calls the model
         makes come back in `RequestResult.tool_calls`.
+
+        `retries` re-issues the request on a TRANSIENT failure — a 5xx server error
+        (e.g. a momentary 503 overload) or a connection/timeout error — with a short
+        backoff. Used by the capability probes so a brief server hiccup doesn't fail
+        a whole test; the load/soak paths leave it at 0, since there a 503 is the
+        admission-control signal we want to measure, not retry away.
         """
+        for attempt in range(retries + 1):
+            r = await self._generate_attempt(
+                model=model, prompt=prompt, max_tokens=max_tokens, temperature=temperature,
+                system=system, force_output=force_output, stop=stop, top_p=top_p, seed=seed,
+                logprobs=logprobs, tools=tools, tool_choice=tool_choice)
+            if r.ok or attempt >= retries or not _is_transient(r.error):
+                return r
+            await asyncio.sleep(min(2.0, 0.4 * (attempt + 1)))
+        return r
+
+    async def _generate_attempt(self, *, model, prompt, max_tokens=128, temperature=0.0,
+                                system=None, force_output=False, stop=None, top_p=None,
+                                seed=None, logprobs=False, tools=None,
+                                tool_choice=None) -> RequestResult:
         # Attempts in order; on a retriable 400/422 we drop the fields most likely
         # to be unsupported — first stream_options, then ignore_eos/min_tokens.
         combos = [(force_output, True), (force_output, False)]
@@ -229,7 +260,7 @@ class LLMClient:
                 code = e.response.status_code
                 body = ""
                 try:
-                    body = e.response.text[:300]
+                    body = e.response.text[:600]
                 except Exception:
                     pass
                 # Retry a validation 400/422 with fewer optional fields — never an

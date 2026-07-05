@@ -25,6 +25,12 @@ LONG_PROMPT = (
 
 SANITY_PROMPT = "What is 17 + 25? Give the final answer as a number."
 
+# Capability probes (compliance / integrity / model-fit / recall) retry a transient
+# 5xx or connection error a couple of times, so a momentary server hiccup (e.g. a
+# 503 overload) doesn't fail the whole test. The load/soak paths deliberately do
+# NOT retry — there a 503 is the admission-control signal being measured.
+_PROBE_RETRIES = 2
+
 _VOCAB = ["lorem", "ipsum", "dolor", "sit", "amet", "consectetur", "adipiscing",
           "elit", "sed", "tempor", "incididunt", "labore", "magna", "aliqua",
           "enim", "minim", "veniam", "quis", "nostrud", "exercitation"]
@@ -390,7 +396,7 @@ async def needle_test(client: LLMClient, model: str, *, ctx_tokens: int = 4096,
         prompt = (_filler(before) + needle + _filler(max(1, total - before)) +
                   "\n\nQuestion: What is the secret access code? Answer with the code only.")
         r = await client.generate(model=model, prompt=prompt, max_tokens=answer_tokens,
-                                  temperature=0.0)
+                                  temperature=0.0, retries=_PROBE_RETRIES)
         got = _visible_answer(r)
         results.append({"depth": d, "passed": bool(r.ok and code in got),
                         "code": code, "got": got[:40], "error": r.error})
@@ -1043,7 +1049,7 @@ async def suitability_test(client: LLMClient, model: Optional[str], *,
     async def ask(system, user, max_tokens, tools=None, tool_choice=None):
         r = await client.generate(model=model, prompt=user, system=system,
                                   max_tokens=max_tokens, temperature=0.0,
-                                  tools=tools, tool_choice=tool_choice)
+                                  tools=tools, tool_choice=tool_choice, retries=_PROBE_RETRIES)
         if r.ok and r.total_time > 0:
             lat_samples.append((r.total_time, r.output_tps))
         return r
@@ -1077,7 +1083,9 @@ async def suitability_test(client: LLMClient, model: Optional[str], *,
                 if ok:
                     detail = f"✓ {got} {got_args}"
                 elif not r.ok:
-                    detail = f"→ request failed: {r.error[:60]}"
+                    # Full error (not truncated) so double-clicking the row reveals
+                    # the whole server message — e.g. exactly why a 503 was returned.
+                    detail = f"→ request failed: {r.error}"
                 elif not calls:
                     # Nothing extractable — show what the model actually said, so a
                     # failure is self-diagnosing instead of just "→ ∅".
@@ -1278,7 +1286,7 @@ async def _detect_reasoning(client: LLMClient, model: str) -> bool:
     generates tokens while leaving the visible answer empty (thinking ate the
     budget). Lets the probes give the model room to finish and reach an answer."""
     r = await client.generate(model=model, prompt="Reply with the single word: pong.",
-                              max_tokens=64, temperature=0.0)
+                              max_tokens=64, temperature=0.0, retries=_PROBE_RETRIES)
     if not r.ok:
         return False
     if (r.reasoning or "").strip():
@@ -1302,7 +1310,8 @@ async def _readiness_compliance(client: LLMClient, model: str,
         emit({"event": "check", **row})
 
     async def one(prompt, max_tokens, **kw):
-        return await client.generate(model=model, prompt=prompt, max_tokens=max_tokens, **kw)
+        return await client.generate(model=model, prompt=prompt, max_tokens=max_tokens,
+                                     retries=_PROBE_RETRIES, **kw)
 
     # On a reasoning model, answer probes need room for the chain-of-thought.
     def budget(base):
@@ -1378,7 +1387,7 @@ async def _readiness_compliance(client: LLMClient, model: str,
 
     # 10. Clean error on an invalid request (rather than a 5xx or a hang).
     r = await client.generate(model="__llmscanner_nonexistent_model__",
-                              prompt="hi", max_tokens=8)
+                              prompt="hi", max_tokens=8, retries=_PROBE_RETRIES)
     clean = bool((not r.ok) and r.error.startswith("HTTP 4"))
     add("Clean error on bad request", clean,
         (r.error[:60] if not r.ok else "accepted an invalid model — no validation"),
@@ -1421,7 +1430,7 @@ async def _readiness_compliance(client: LLMClient, model: str,
         r = await client.generate(
             model=model, prompt="What's the weather in Tallinn right now? Use celsius.",
             max_tokens=budget(128), temperature=0.0,
-            tools=[_NATIVE_TOOL_SCHEMA], tool_choice="auto")
+            tools=[_NATIVE_TOOL_SCHEMA], tool_choice="auto", retries=_PROBE_RETRIES)
         native_ok = bool(r.ok and r.tool_calls and r.tool_calls[0][0] == "get_weather")
         if native_ok:
             ndetail = f"✓ {r.tool_calls[0][0]}({r.tool_calls[0][1]})"
@@ -1473,7 +1482,7 @@ async def _readiness_compliance(client: LLMClient, model: str,
                     scheme=client.scheme, base_path=client.base_path,
                     endpoint=client.endpoint, timeout=min(client.timeout, 20.0),
                     extra_body=client.extra_body)
-    ra = await bad.generate(model=model, prompt="hi", max_tokens=4)
+    ra = await bad.generate(model=model, prompt="hi", max_tokens=4, retries=_PROBE_RETRIES)
     enforced = (not ra.ok) and any(ra.error.startswith(f"HTTP {c}") for c in ("401", "403"))
     if enforced:
         adetail = "bad API key rejected (401/403)"
@@ -1528,7 +1537,8 @@ async def _readiness_integrity(client: LLMClient, model: str,
               "detail": str(detail)[:90], "req": "integrity"})
 
     async def one(prompt, max_tokens, **kw):
-        return await client.generate(model=model, prompt=prompt, max_tokens=max_tokens, **kw)
+        return await client.generate(model=model, prompt=prompt, max_tokens=max_tokens,
+                                     retries=_PROBE_RETRIES, **kw)
 
     # 1. Token-count honesty — force a known output length, then compare the
     #    server's reported completion_tokens against a tokenizer-agnostic estimate
