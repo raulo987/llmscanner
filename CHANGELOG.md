@@ -6,6 +6,15 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
+### 2026-07-06 (calculator-juhtumid eksplitsiitseks; klikk-avab-detaili)
+- **Model-fit tabelil topeltklõps real avab mudeli täis-prompti ja täis-detaili** eraldi aknas
+  (tabeliveerud lõikavad pika teksti ära, nt "→ no tool call — model said: …").
+- **Model-fit calculator-juhtumid teevad nüüd eksplitsiitse tööriista-palve** ("Use the calculator
+  tool to compute …"). Varem: võimekas mudel arvutas lihtsa aritmeetika ise (õigesti!) tööriista
+  kutsumata, mida test luges veaks — see kõigutas tool-skoori juhuslikult (nt 76% ↔ 88%). Nüüd on
+  ootus üheselt tööriista-kutse, seega juht on deterministlik. (Weather/search/email juhud on
+  muutmata — need vajavad päriselt tööriista.)
+
 ### 2026-07-06 (Model-fit natiivne tool-calling; native-värav ka OpenRouterile; completions-serv)
 - **Model-fit testib nüüd natiivset tool-callingut** (OpenAI `tools` API), Hermes-prompt tagavarana.
   Varem testis Model-fit **ainult** Hermes-`<tool_call>` konventsiooni, mistõttu natiivset tool-callingut

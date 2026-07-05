@@ -1875,6 +1875,11 @@ class App:
         self.fit_tree.tag_configure("pass", foreground=self.pal["live_ok"])
         self.fit_tree.tag_configure("fail", foreground=self.pal["live_err"])
         wrap.pack(fill="both", expand=True)
+        # Double-click a row to see the full probe + detail (the columns truncate).
+        self._fit_case_by_iid = {}
+        self.fit_tree.bind("<Double-1>", self._on_fit_row_open)
+        ctk.CTkLabel(left, text="Double-click a row to see the full probe & detail.",
+                     text_color=self.pal["sub"]).pack(anchor="w", pady=(2, 0))
         self.fit_log = LiveLog(right, self.pal, fg_color="transparent")
         self.fit_log.pack(fill="both", expand=True)
 
@@ -1901,6 +1906,7 @@ class App:
         self._fit_params = {"dims": dims}
         for iid in self.fit_tree.get_children():
             self.fit_tree.delete(iid)
+        self._fit_case_by_iid = {}
         self.fit_log.clear()
         self.fit_log.write(f"▶ Model fit · {client.base_url}", "head")
         thinkdesc = "thinking OFF (agentic mode)" if no_think else "thinking as-configured"
@@ -1922,12 +1928,40 @@ class App:
         if ev == "case":
             dim = self._DIM_LABEL.get(evt["dim"], evt["dim"])
             mark = "✓" if evt["ok"] else "✗"
-            self.fit_tree.insert("", "end", tags=("pass" if evt["ok"] else "fail",),
-                                 values=(dim, evt["user"][:70], mark, evt["detail"][:80]))
+            iid = self.fit_tree.insert("", "end", tags=("pass" if evt["ok"] else "fail",),
+                                       values=(dim, evt["user"][:70], mark, evt["detail"][:80]))
+            # Keep the full, untruncated text for the double-click detail view.
+            self._fit_case_by_iid[iid] = {"dim": dim, "user": evt["user"],
+                                          "ok": evt["ok"], "detail": evt["detail"]}
             self.fit_tree.yview_moveto(1.0)
         elif ev == "dim_done":
             self.fit_log.write(f"   {evt['dim']}: score {evt['score'] * 100:.0f}%",
                                "ok" if evt["score"] >= 0.85 else "err")
+
+    def _on_fit_row_open(self, event):
+        """Double-click a Model-fit row → show its full probe & detail."""
+        iid = self.fit_tree.identify_row(event.y)
+        d = self._fit_case_by_iid.get(iid)
+        if not d:
+            return
+        self._show_detail_dialog(
+            "Model-fit probe",
+            [f"Dimension:  {d['dim']}",
+             f"Result:     {'✓ pass' if d['ok'] else '✗ fail'}",
+             "", "Probe:", d["user"], "", "Detail:", d["detail"]])
+
+    def _show_detail_dialog(self, title: str, lines: list):
+        """A small read-only, copyable popup showing full text for a table row."""
+        win = ctk.CTkToplevel(self.root)
+        win.title(title)
+        win.geometry(self._sized_geometry(680, 420))
+        win.transient(self.root)
+        box = ctk.CTkTextbox(win, wrap="word", font=("TkFixedFont", 13))
+        box.pack(fill="both", expand=True, padx=12, pady=(12, 6))
+        box.insert("1.0", "\n".join(lines))
+        box.configure(state="disabled")
+        ctk.CTkButton(win, text=self.t("close"), width=90,
+                      command=win.destroy).pack(pady=(0, 12))
 
     def _modelfit_done(self, report: dict):
         v = report["verdict"]

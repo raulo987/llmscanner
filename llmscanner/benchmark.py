@@ -888,9 +888,11 @@ _TOOL_CASES = [
      "tool": "web_search", "args": {"query": "eston"}},
     {"user": "Look online for information about the James Webb Space Telescope.",
      "tool": "web_search", "args": {"query": "webb"}},
-    {"user": "What is 2348 multiplied by 19?",
+    # Explicitly ask for the tool — otherwise a capable model reasonably computes
+    # simple arithmetic itself (answers directly), which isn't a tool-calling miss.
+    {"user": "Use the calculator tool to compute 2348 multiplied by 19.",
      "tool": "calculator", "args": {"expression": ["2348", "19"]}},
-    {"user": "Please compute 145 + 998 - 37.",
+    {"user": "Use the calculator tool to compute 145 + 998 - 37.",
      "tool": "calculator", "args": {"expression": ["145", "998", "37"]}},
     {"user": "Send an email to john@example.com with the subject Lunch asking if "
              "he is free at noon tomorrow.",
