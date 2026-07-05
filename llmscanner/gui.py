@@ -126,6 +126,7 @@ TR_ET = {
     # history: compare + report
     "Compare selected": "Võrdle valitud", "Export report": "Ekspordi raport",
     "Copy sweep table": "Kopeeri sweep-tabel", "Copy report": "Kopeeri raport",
+    "Copy results": "Kopeeri tulemused",
     "Disable thinking during test (test the agentic mode)":
         "Lülita thinking testi ajaks välja (testi agentset režiimi)",
 }
@@ -1850,6 +1851,8 @@ class App:
                                        command=self.cancel_current)
         btn_fit_cancel.pack(side="left", padx=8)
         self._cancel_btns.append(btn_fit_cancel)
+        ctk.CTkButton(runbar, text=self.L("Copy results"), width=110,
+                      command=self.copy_modelfit_results).pack(side="left", padx=(0, 8))
         ctk.CTkLabel(runbar, text="Deterministic (temperature 0) — a couple dozen short probes.",
                      text_color=self.pal["sub"]).pack(side="left", padx=10)
 
@@ -1937,6 +1940,30 @@ class App:
         elif ev == "dim_done":
             self.fit_log.write(f"   {evt['dim']}: score {evt['score'] * 100:.0f}%",
                                "ok" if evt["score"] >= 0.85 else "err")
+
+    def copy_modelfit_results(self):
+        """Copy the model-fit report (verdict + scores) plus the full per-probe
+        table (with untruncated details) to the clipboard."""
+        report = self.fit_log.get_text().strip()
+        rows = self.fit_tree.get_children()
+        if not report and not rows:
+            messagebox.showinfo(APP_TITLE, "No model-fit results to copy yet — run a test first.")
+            return
+        parts = []
+        if report:
+            parts.append(report)
+        if rows:
+            parts.append("")
+            parts.append("dimension\tprobe\tok\tdetail")
+            for iid in rows:
+                d = self._fit_case_by_iid.get(iid)
+                if d:
+                    parts.append(f"{d['dim']}\t{d['user']}\t"
+                                 f"{'ok' if d['ok'] else 'fail'}\t{d['detail']}")
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(parts))
+        self._set_status(f"Copied model-fit results ({len(rows)} probes) to the clipboard.")
+        self.fit_log.write(f"📋 Copied results ({len(rows)} probes) to clipboard", "ok")
 
     def _on_fit_row_open(self, event):
         """Double-click a Model-fit row → show its full probe & detail."""

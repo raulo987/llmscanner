@@ -6,6 +6,11 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
+### 2026-07-06 (Model-fit "Copy results" nupp)
+- **Model-fit tabil "Copy results" nupp** — kopeerib lõikelauale raporti (verdikt + skoorid) ja
+  kogu proovi-tabeli **täis-detailidega** (sh täielikud vea-teated), tab-eraldatud kujul. Sama mustri
+  järgi nagu Provider-fit / Benchmark / Optimum finder.
+
 ### 2026-07-06 (mööduva serveri-tõrke (5xx) automaatne kordamine proovidel)
 - **Võimekus-proovid (compliance / integrity / model-fit / recall) kordavad nüüd mööduva 5xx serveri-
   tõrke (nt hetkeline 503 üle-koormus) või ühendus-/timeout-vea korral automaatselt** (kuni 2× väikese
