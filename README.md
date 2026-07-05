@@ -399,10 +399,12 @@ Kiired üksik-proovid, igaüks vastab ühele kõvale nõudele, mille router serv
   vLLM/TGI/SGLang tegelikult kasutavad); loeb vastuse `tool_calls` (streaming + non-stream). **Gate'ib
   nii OpenRouteri kui HuggingFace'i verdikti.** (`/v1/completions` otspunktil n/a — legacy API-l pole
   tools'i.)
-- **Tool calling (Hermes prompt)** — eraldi, informatiivne kontroll: kas mudel vastab ka prompt-
-  põhisele Hermes/NousResearch `<tool_call>` XML-konventsioonile (Openclaw/agent-raamistikud, mis
-  seda kasutavad). **Ei mõjuta verdikti** — üks kindel fine-tune'i tava, mitte API-lepingu nõue.
-  Kui proov ebaõnnestub, näidatakse mudeli tegelikku vastust (mitte ainult "ebaõnnestus").
+- **Tool calling (Hermes prompt)** — **tagavara-kontroll**, mis jookseb AINULT siis, kui natiivne API
+  (ülal) ei tööta. Natiivse tööriista-kutsega mudel ei vaja prompt-põhist Hermes/NousResearch
+  `<tool_call>` XML-konventsiooni, seega näidatakse siis lihtsalt _"n/a — native tool-calling works"_
+  (roheline), mitte segadust tekitavat punast. Kui natiivne kukub, testitakse Hermes-konventsiooni
+  (Openclaw/agent-raamistikud) ja ebaõnnestumisel näidatakse mudeli tegelikku vastust. **Ei mõjuta
+  verdikti** kummalgi juhul — informatiivne.
 - **Structured output** — nõutud JSON-kuju parse'ub + vastab skeemile. **HF testib structured-output'i.**
 - **/v1/models metadata** — `context_length` (+ pricing) on avaldatud. Mõlemad routerid loevad neid
   `/v1/models`-ist (OpenRouteri model-spec; HF `:fastest`/`:cheapest` valik).

@@ -1393,36 +1393,14 @@ async def _readiness_compliance(client: LLMClient, model: str,
         (r.error[:60] if not r.ok else "accepted an invalid model — no validation"),
         "returns a 4xx JSON error, not 5xx / timeout")
 
-    # 11. Tool calling (Hermes prompt) — a prompt-embedded convention (tool specs
-    #     as text in the system prompt, response wrapped in <tool_call> XML) that
-    #     some fine-tunes (Hermes/NousResearch, agent frameworks like Openclaw)
-    #     rely on. Informational — it does NOT gate the verdicts below, since a
-    #     router's actual API contract is the native `tools` parameter (next check).
-    tool_pos = [c for c in _TOOL_CASES if c["tool"]][:3]
-    thits = 0
-    sample = ""
-    for c in tool_pos:
-        r = await one(c["user"], budget(256), temperature=0.0, system=_HERMES_SYSTEM)
-        calls = _extract_tool_calls(_visible_answer(r)) if r.ok else []
-        if calls and calls[0][0] == c["tool"]:
-            thits += 1
-        elif not sample:
-            # Nothing extractable — capture what the model actually said, so a
-            # failure is self-diagnosing instead of a bare "0/3 correct".
-            sample = _raw_snippet(_visible_answer(r)) if r.ok else repr(r.error[:60])
-    tool_ok = thits >= max(1, len(tool_pos) - 1)   # allow one miss
-    detail = f"{thits}/{len(tool_pos)} correct Hermes tool calls"
-    if not tool_ok and sample:
-        detail += f" — e.g. model said: {sample}"
-    add("Tool calling (Hermes prompt)", tool_ok, detail,
-        "prompt-embedded tool-calling convention (Hermes/NousResearch XML)")
-
-    # 11b. Tool calling (native API) — the standard OpenAI `tools` request
-    #      parameter (structured schema in, `tool_calls` in the response), which is
-    #      what OpenRouter / vLLM / TGI / SGLang actually implement — the real API
-    #      contract a provider must satisfy. Gates the verdicts. The legacy
-    #      /v1/completions endpoint has no tools API, so it's n/a there.
-    if client.endpoint == "completions":
+    # 11. Tool calling (native API) — the standard OpenAI `tools` request parameter
+    #     (structured schema in, `tool_calls` in the response), which is what
+    #     OpenRouter / vLLM / TGI / SGLang actually implement — the real API contract
+    #     a provider must satisfy. Gates the verdicts. The legacy /v1/completions
+    #     endpoint has no tools API, so it's n/a there.
+    native_ok = False
+    native_na = client.endpoint == "completions"
+    if native_na:
         add("Tool calling (native API)", True,
             "n/a — /v1/completions has no tools API (use the chat endpoint)",
             "supports the standard OpenAI `tools` request parameter")
@@ -1443,6 +1421,36 @@ async def _readiness_compliance(client: LLMClient, model: str,
             ndetail = f"no tool_calls — model said: {snippet}" if snippet else "no tool_calls, empty response"
         add("Tool calling (native API)", native_ok, ndetail,
             "supports the standard OpenAI `tools` request parameter")
+
+    # 11b. Tool calling (Hermes prompt) — a FALLBACK, only checked when the native
+    #      API above didn't work. A model that does native tool-calling doesn't need
+    #      the prompt-embedded Hermes/NousResearch <tool_call> XML convention (used by
+    #      some fine-tunes / agent frameworks like Openclaw), so we skip it and mark
+    #      it n/a rather than showing a confusing red for a capable model.
+    #      Informational either way — it never gates the verdicts.
+    if native_ok or native_na:
+        add("Tool calling (Hermes prompt)", True,
+            "n/a — native tool-calling works" if native_ok else "n/a — completions endpoint",
+            "prompt-embedded fallback convention, only checked if native fails")
+    else:
+        tool_pos = [c for c in _TOOL_CASES if c["tool"]][:3]
+        thits = 0
+        sample = ""
+        for c in tool_pos:
+            r = await one(c["user"], budget(256), temperature=0.0, system=_HERMES_SYSTEM)
+            calls = _extract_tool_calls(_visible_answer(r)) if r.ok else []
+            if calls and calls[0][0] == c["tool"]:
+                thits += 1
+            elif not sample:
+                # Nothing extractable — capture what the model actually said, so a
+                # failure is self-diagnosing instead of a bare "0/3 correct".
+                sample = _raw_snippet(_visible_answer(r)) if r.ok else repr(r.error[:60])
+        tool_ok = thits >= max(1, len(tool_pos) - 1)   # allow one miss
+        detail = f"{thits}/{len(tool_pos)} correct Hermes tool calls"
+        if not tool_ok and sample:
+            detail += f" — e.g. model said: {sample}"
+        add("Tool calling (Hermes prompt)", tool_ok, detail,
+            "prompt-embedded fallback convention (Hermes/NousResearch XML)")
 
     # 12. Structured output — HuggingFace also runs a structured-output test.
     json_cases = _JSON_CASES[:2]

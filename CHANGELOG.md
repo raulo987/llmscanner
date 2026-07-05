@@ -6,6 +6,14 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
+### 2026-07-06 (Hermes tööriista-proov nüüd tagavara, mitte alati)
+- **Provider-fit'i "Tool calling (Hermes prompt)" kontroll on nüüd TAGAVARA** — see jookseb ainult siis,
+  kui natiivne `tools` API-kontroll (mis gate'ib verdikti) ei tööta. Natiivse tööriista-kutsega mudel
+  (nt Qwen3) ei vaja prompt-põhist Hermes/NousResearch `<tool_call>` XML-konventsiooni, seega näidatakse
+  nüüd rohelist _"n/a — native tool-calling works"_ segadust tekitava punase _"0/3 correct Hermes tool
+  calls"_ asemel. Kui natiivne kukub, testitakse Hermes-t nagu varem (3 juhtu, näidatakse mudeli
+  tegelikku vastust). Kumbki kontroll ei mõjuta verdikti — mõlemad on informatiivsed.
+
 ### 2026-07-06 (Model-fit "Copy results" nupp)
 - **Model-fit tabil "Copy results" nupp** — kopeerib lõikelauale raporti (verdikt + skoorid) ja
   kogu proovi-tabeli **täis-detailidega** (sh täielikud vea-teated), tab-eraldatud kujul. Sama mustri
