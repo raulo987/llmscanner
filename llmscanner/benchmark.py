@@ -376,8 +376,11 @@ async def context_limit_probe(client: LLMClient, model: str, *, low: int = 256,
 
 
 async def needle_test(client: LLMClient, model: str, *, ctx_tokens: int = 4096,
-                      depths=(0.1, 0.5, 0.9)):
-    """Hide a secret code in a long context at several depths and ask for it back."""
+                      depths=(0.1, 0.5, 0.9), answer_tokens: int = 32):
+    """Hide a secret code in a long context at several depths and ask for it back.
+
+    `answer_tokens` bounds the reply; give a reasoning model room (it thinks before
+    answering). The code is matched against the visible answer (<think> stripped)."""
     results = []
     total = max(1, int(ctx_tokens * 0.9))
     for d in depths:
@@ -386,8 +389,9 @@ async def needle_test(client: LLMClient, model: str, *, ctx_tokens: int = 4096,
         before = int(total * d)
         prompt = (_filler(before) + needle + _filler(max(1, total - before)) +
                   "\n\nQuestion: What is the secret access code? Answer with the code only.")
-        r = await client.generate(model=model, prompt=prompt, max_tokens=32, temperature=0.0)
-        got = (r.text or "").strip()
+        r = await client.generate(model=model, prompt=prompt, max_tokens=answer_tokens,
+                                  temperature=0.0)
+        got = _visible_answer(r)
         results.append({"depth": d, "passed": bool(r.ok and code in got),
                         "code": code, "got": got[:40], "error": r.error})
     return {"results": results, "passed": sum(1 for x in results if x["passed"]),
@@ -1186,9 +1190,50 @@ def _classify_load_errors(errors: list) -> tuple:
     return rej, len(errors) - rej
 
 
+# Token budget for a correctness probe against a reasoning model — the hidden
+# chain-of-thought has to finish before the visible answer appears, so a 16-token
+# budget would be spent entirely on reasoning.
+_REASONING_ANSWER_TOKENS = 2048
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(r"<think>", re.IGNORECASE)
+
+
+def _visible_answer(r) -> str:
+    """The visible answer, with <think>…</think> reasoning stripped. Also handles
+    an UNCLOSED <think> (the token budget ran out mid-thought, common when a probe
+    doesn't give a reasoning model enough room) by dropping everything from the
+    opening tag on — otherwise a truncated chain-of-thought would be scored as the
+    answer. Harmless for non-reasoning models (no tag → text as-is)."""
+    text = _THINK_RE.sub("", (r.text or ""))
+    m = _THINK_OPEN_RE.search(text)
+    if m:
+        text = text[:m.start()]
+    return text.strip()
+
+
+async def _detect_reasoning(client: LLMClient, model: str) -> bool:
+    """Is this a reasoning model? True if the server returns reasoning_content, emits
+    an (even unclosed) <think> tag in content — the common local-server style (vLLM /
+    llama.cpp / SGLang inline the chain-of-thought with no separate field) — or
+    generates tokens while leaving the visible answer empty (thinking ate the
+    budget). Lets the probes give the model room to finish and reach an answer."""
+    r = await client.generate(model=model, prompt="Reply with the single word: pong.",
+                              max_tokens=64, temperature=0.0)
+    if not r.ok:
+        return False
+    if (r.reasoning or "").strip():
+        return True
+    if _THINK_OPEN_RE.search(r.text or ""):
+        return True
+    return bool(r.completion_tokens > 8 and not _visible_answer(r))
+
+
 async def _readiness_compliance(client: LLMClient, model: str,
-                                emit: Callable[[dict], None]) -> list:
-    """Run the API-contract probes; return a list of {name, ok, detail, req}."""
+                                emit: Callable[[dict], None],
+                                reasoning: bool = False) -> list:
+    """Run the API-contract probes; return a list of {name, ok, detail, req}.
+    When `reasoning` is set, content-dependent probes get a large token budget and
+    strip <think> so a thinking model can actually reach its visible answer."""
     checks: list = []
 
     def add(name, ok, detail, req):
@@ -1199,10 +1244,15 @@ async def _readiness_compliance(client: LLMClient, model: str,
     async def one(prompt, max_tokens, **kw):
         return await client.generate(model=model, prompt=prompt, max_tokens=max_tokens, **kw)
 
+    # On a reasoning model, answer probes need room for the chain-of-thought.
+    def budget(base):
+        return _REASONING_ANSWER_TOKENS if reasoning else base
+
     # 1. Basic chat completion.
-    r = await one("Reply with the single word: pong.", 16, temperature=0.0)
-    add("Chat endpoint", r.ok and bool((r.text or "").strip()),
-        (r.text or "").strip()[:40] if r.ok else r.error,
+    r = await one("Reply with the single word: pong.", budget(16), temperature=0.0)
+    ans = _visible_answer(r)
+    add("Chat endpoint", r.ok and bool(ans),
+        (ans[:40] if r.ok else r.error) or "(empty content — reasoning only?)",
         "OpenAI /v1/chat/completions returns a completion")
 
     # 2 + 3. Streaming and usage accounting (one longer request tells us both).
@@ -1230,29 +1280,29 @@ async def _readiness_compliance(client: LLMClient, model: str,
 
     # 6. Stop sequences.
     r = await one("Output exactly these words separated by single spaces and nothing "
-                  "else: alpha bravo charlie delta echo", 48, temperature=0.0,
+                  "else: alpha bravo charlie delta echo", budget(48), temperature=0.0,
                   stop=["charlie"])
-    txt = (r.text or "").lower()
+    txt = _visible_answer(r).lower()
     stop_ok = bool(r.ok and "alpha" in txt and "delta" not in txt and "echo" not in txt)
     add("Stop sequences", stop_ok,
-        (repr((r.text or "").strip()[:40]) if r.ok else r.error) if not stop_ok
+        (repr(_visible_answer(r)[:40]) if r.ok else r.error) if not stop_ok
         else "cut off at the stop token",
         "honors the stop parameter")
 
     # 7. Determinism at temperature 0 (greedy decode should be reproducible).
-    a = await one("Name three colours, comma separated, lowercase.", 24, temperature=0.0)
-    b = await one("Name three colours, comma separated, lowercase.", 24, temperature=0.0)
-    det = bool(a.ok and b.ok and (a.text or "").strip()[:60] == (b.text or "").strip()[:60])
+    a = await one("Name three colours, comma separated, lowercase.", budget(24), temperature=0.0)
+    b = await one("Name three colours, comma separated, lowercase.", budget(24), temperature=0.0)
+    det = bool(a.ok and b.ok and _visible_answer(a)[:60] == _visible_answer(b)[:60])
     add("Deterministic (temp 0)", det,
         "identical output on repeat" if det else "temp-0 output varied between calls",
         "reproducible greedy decoding")
 
     # 8. Sampling params actually take effect.
-    a = await one("Write one short sentence about the sea.", 32, temperature=1.0,
+    a = await one("Write one short sentence about the sea.", budget(32), temperature=1.0,
                   top_p=0.95, seed=1)
-    b = await one("Write one short sentence about the sea.", 32, temperature=1.0,
+    b = await one("Write one short sentence about the sea.", budget(32), temperature=1.0,
                   top_p=0.95, seed=2)
-    varies = bool(a.ok and b.ok and (a.text or "").strip() != (b.text or "").strip())
+    varies = bool(a.ok and b.ok and _visible_answer(a) != _visible_answer(b))
     add("Sampling params applied", varies,
         "temperature/seed produce varied output" if varies
         else "identical output despite temp/seed change",
@@ -1279,8 +1329,8 @@ async def _readiness_compliance(client: LLMClient, model: str,
     tool_pos = [c for c in _TOOL_CASES if c["tool"]][:3]
     thits = 0
     for c in tool_pos:
-        r = await one(c["user"], 256, temperature=0.0, system=_HERMES_SYSTEM)
-        calls = _extract_tool_calls(r.text) if r.ok else []
+        r = await one(c["user"], budget(256), temperature=0.0, system=_HERMES_SYSTEM)
+        calls = _extract_tool_calls(_visible_answer(r)) if r.ok else []
         if calls and calls[0][0] == c["tool"]:
             thits += 1
     tool_ok = thits >= max(1, len(tool_pos) - 1)   # allow one miss
@@ -1291,11 +1341,11 @@ async def _readiness_compliance(client: LLMClient, model: str,
     json_cases = _JSON_CASES[:2]
     jhits = 0
     for c in json_cases:
-        r = await one(c["user"], 384, temperature=0.0, system=_JSON_SYSTEM)
+        r = await one(c["user"], budget(384), temperature=0.0, system=_JSON_SYSTEM)
         obj = None
         if r.ok:
             try:
-                obj = json.loads(_strip_fences(r.text))
+                obj = json.loads(_strip_fences(_visible_answer(r)))
             except Exception:
                 obj = None
         if obj is not None and _json_schema_ok(obj, c):
@@ -1360,12 +1410,17 @@ _GOLDEN_CASES = [
 
 async def _readiness_integrity(client: LLMClient, model: str,
                                emit: Callable[[dict], None], *,
-                               ctx_probe_tokens: int = 8192, in_tokens: int = 1024) -> dict:
+                               ctx_probe_tokens: int = 8192, in_tokens: int = 1024,
+                               reasoning: bool = False) -> dict:
     """Adversarial honesty probes a router runs on a backend it does not control:
     is the reported token count honest (billing), is the advertised context real,
-    and is the served model actually at the claimed quality (not silently quantised)?"""
+    and is the served model actually at the claimed quality (not silently quantised)?
+    On a reasoning model, quality/recall probes use a large budget and strip <think>,
+    and token honesty counts reasoning tokens (else a thinking model is falsely
+    accused of billing inflation)."""
     out: dict = {}
     ct = [0, 0]  # [passed, total] for the phase summary
+    ans_tokens = _REASONING_ANSWER_TOKENS if reasoning else None
 
     def add(name, ok, detail):
         ct[1] += 1
@@ -1388,11 +1443,16 @@ async def _readiness_integrity(client: LLMClient, model: str,
         out["token_honesty"] = {"ok": None, "detail": "no usage block — cannot verify"}
         add("Token-count honesty", True, "n/a — server sent no usage to verify")
     else:
-        indep = approx_tokens(r.text)
-        ratio = r.completion_tokens / max(indep, 1)
+        # Independent estimate = the most tokens we can actually see: streamed
+        # chunks, or the text + reasoning length. Counting reasoning is essential —
+        # a thinking model's tokens are real output even when `content` is empty.
+        text_est = approx_tokens(r.text) + approx_tokens(r.reasoning or "")
+        indep = max(r.stream_chunks, text_est, 1)
+        ratio = r.completion_tokens / indep
         inflated = ratio > 1.5
-        detail = (f"reported {r.completion_tokens} vs ~{indep} from text (×{ratio:.2f}); "
-                  f"{r.stream_chunks} stream chunks")
+        rnote = f", {approx_tokens(r.reasoning or '')} reasoning" if r.reasoning else ""
+        detail = (f"reported {r.completion_tokens} vs ~{indep} generated "
+                  f"({r.stream_chunks} chunks{rnote}); ×{ratio:.2f}")
         out["token_honesty"] = {"ok": not inflated, "ratio": ratio,
                                 "reported": r.completion_tokens, "text_est": indep,
                                 "chunks": r.stream_chunks, "detail": detail}
@@ -1403,7 +1463,8 @@ async def _readiness_integrity(client: LLMClient, model: str,
     #    claimed context length isn't real.
     advertised = await client.model_max_len(model)
     size = min(ctx_probe_tokens, advertised) if advertised else ctx_probe_tokens
-    nd = await needle_test(client, model, ctx_tokens=size, depths=(0.1, 0.5, 0.9))
+    nd = await needle_test(client, model, ctx_tokens=size, depths=(0.1, 0.5, 0.9),
+                           answer_tokens=(ans_tokens or 32))
     ctx_ok = nd["passed"] >= 2
     detail = (f"recalled {nd['passed']}/{nd['total']} at ~{size} tok"
               + (f" (server claims {advertised})" if advertised else ""))
@@ -1415,8 +1476,8 @@ async def _readiness_integrity(client: LLMClient, model: str,
     #    (quantised/wrong/broken) model drops these.
     hits = 0
     for c in _GOLDEN_CASES:
-        rr = await one(c["user"], 24, temperature=0.0)
-        txt = (rr.text or "").lower()
+        rr = await one(c["user"], ans_tokens or 24, temperature=0.0)
+        txt = _visible_answer(rr).lower()
         if rr.ok and any(m in txt for m in c["must"]):
             hits += 1
     score = hits / len(_GOLDEN_CASES)
@@ -1667,15 +1728,25 @@ async def provider_readiness(client: LLMClient, model: Optional[str], *,
     report: dict = {"model": model, "in_tokens": in_tokens, "out_tokens": out_tokens,
                     "ttft_sla_s": ttft_sla_s}
 
+    # Detect reasoning models up front — their hidden chain-of-thought empties the
+    # visible `content` under a small token budget, so the correctness/quality/recall
+    # probes must give them room and strip <think> to read the real answer.
+    reasoning = await _detect_reasoning(client, model)
+    report["reasoning_model"] = reasoning
+    if reasoning:
+        emit({"event": "note", "text": "Reasoning model detected — probes use an expanded "
+              "token budget and strip <think> reasoning to read the visible answer."})
+
     # Phase 1 — API contract compliance.
     emit({"event": "phase", "name": "compliance", "label": "API contract compliance"})
-    report["compliance"] = await _readiness_compliance(client, model, emit)
+    report["compliance"] = await _readiness_compliance(client, model, emit, reasoning=reasoning)
 
     # Phase 2 — integrity / honesty (billing, context, model quality).
     if integrity:
         emit({"event": "phase", "name": "integrity", "label": "Integrity — billing / context / quality"})
         report["integrity"] = await _readiness_integrity(
-            client, model, emit, ctx_probe_tokens=ctx_probe_tokens, in_tokens=in_tokens)
+            client, model, emit, ctx_probe_tokens=ctx_probe_tokens, in_tokens=in_tokens,
+            reasoning=reasoning)
 
     # Phase 3 — concurrency sweep / bottleneck hunt.
     emit({"event": "phase", "name": "sweep", "label": "Concurrency sweep — bottleneck hunt"})

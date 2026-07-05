@@ -244,6 +244,7 @@ class LLMClient:
         finish_reason = ""
         logprob_vals: list[float] = []
         parts: list[str] = []
+        reasoning_parts: list[str] = []
 
         # Ask explicitly for an SSE stream — some gateways only stream token-by-token
         # when the client advertises it (otherwise they buffer the whole response,
@@ -264,12 +265,16 @@ class LLMClient:
                         obj = {}
                     usage = obj.get("usage") or None
                     for ch in (obj.get("choices") or []):
-                        piece = (ch.get("message") or {}).get("content") or ch.get("text") or ""
+                        msg = ch.get("message") or {}
+                        piece = msg.get("content") or ch.get("text") or ""
+                        rpiece = msg.get("reasoning_content") or msg.get("reasoning") or ""
                         if ch.get("finish_reason"):
                             finish_reason = ch["finish_reason"]
                         _collect_logprobs(ch.get("logprobs"), logprob_vals)
                         if piece:
                             parts.append(piece)
+                        if rpiece:
+                            reasoning_parts.append(rpiece)
                     # leave chunks=0 / first=None → handled as a non-streamed result below
                 else:
                     async for line in resp.aiter_lines():
@@ -292,14 +297,23 @@ class LLMClient:
                             finish_reason = ch["finish_reason"]
                         _collect_logprobs(ch.get("logprobs"), logprob_vals)
                         if "delta" in ch:
-                            piece = (ch.get("delta") or {}).get("content") or ""
+                            delta = ch.get("delta") or {}
+                            piece = delta.get("content") or ""
+                            rpiece = delta.get("reasoning_content") or delta.get("reasoning") or ""
                         else:
                             piece = ch.get("text") or ""
-                        if piece:
+                            rpiece = ""
+                        # A reasoning model may stream only reasoning tokens (empty
+                        # content). Count those too, and set TTFT on the first token
+                        # of EITHER kind — otherwise streaming looks un-streamed.
+                        if piece or rpiece:
                             if first is None:
                                 first = time.perf_counter()
-                            parts.append(piece)
                             chunks += 1
+                            if piece:
+                                parts.append(piece)
+                            if rpiece:
+                                reasoning_parts.append(rpiece)
 
         end = time.perf_counter()
         streamed = first is not None
@@ -334,4 +348,5 @@ class LLMClient:
             finish_reason=finish_reason,
             stream_chunks=chunks,
             logprob_avg=(sum(logprob_vals) / len(logprob_vals)) if logprob_vals else None,
+            reasoning="".join(reasoning_parts),
         )

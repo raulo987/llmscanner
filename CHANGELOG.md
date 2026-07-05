@@ -6,6 +6,23 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
+### 2026-07-05 (reasoning-mudelite tugi Provider-fit'is)
+- **Reasoning-mudelid** (nt DeepSeek-R1 / Qwen thinking) ei anna enam valet "EI SOBI" raportit.
+  Varem: kui mudel pani nähtava vastuse `reasoning_content`-i ja väike token-eelarve kulus peidetud
+  arutlusele, sai tööriist teksti tagasi tühjana → kaskaad valesid kukkumisi (sh vale "token-
+  inflatsioon ×N" ja "kvaliteet 0%").
+  - Klient püüab nüüd **`reasoning_content` / `reasoning`** (streaming + non-stream), loeb need
+    chunkide sisse ja **mõõdab TTFT ka esimese reasoning-tokeni pealt** (parandab streaming-tuvastuse).
+  - **Token-aususe test loeb reasoning-tokenid kaasa** — thinking-mudelit ei süüdistata enam
+    billing-inflatsioonis (reaalsed tokenid on ausad, ka kui `content` on tühi).
+  - Provider-fit **tuvastab reasoning-mudeli** ja annab korrektsus-/kvaliteedi-/recall-proovidele
+    **laiendatud token-eelarve** + eemaldab `<think>…</think>`, et jõuda nähtava vastuseni.
+  - Raport märgib "🧠 reasoning model" ja History salvestab `reasoning model: yes/no`.
+  - Tuvastus ja eemaldus töötavad ka **kohaliku serveri stiiliga** reasoning-mudelitel (vLLM /
+    llama.cpp / SGLang), kus `<think>` on **otse `content`-is**, mitte eraldi `reasoning_content`
+    väljas — sh juhul kui token-eelarve ei jõua sulgevat `</think>` silti kätte saada (poolelijäänud
+    arutlus loetakse tervikuna reasoning'uks, mitte vastuseks).
+
 ### 2026-07-05 (mugavus & andmed)
 - **Koormuse eelseaded** — Connection-tabil nupud **Vestlus / RAG / Agent**, mis täidavad ühe
   klõpsuga mõistlikud parameetrid Benchmark-, Soak- ja Provider-fit-tabidel.

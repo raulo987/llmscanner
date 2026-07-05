@@ -2073,6 +2073,8 @@ class App:
         if ev == "phase":
             self.ready_log.write(f"— {evt['label']} —", "head")
             self._set_status(evt["label"])
+        elif ev == "note":
+            self.ready_log.write(f"🧠 {evt['text']}", "head")
         elif ev == "check":
             self.ready_log.write(f"{'✓' if evt['ok'] else '✗'} {evt['name']}: {evt['detail']}",
                                  "ok" if evt["ok"] else "err")
@@ -2111,6 +2113,9 @@ class App:
             text=f"OpenRouter:  {orv}\nHuggingFace: {hfv}", text_color=tone(orv))
 
         self.ready_log.write("✓ Provider-fit test complete", "ok")
+        if report.get("reasoning_model"):
+            self.ready_log.write("🧠 Reasoning model — probes ran with expanded budget "
+                                 "and <think> stripped.", "head")
         self.ready_log.write(f"Bottleneck: {a['text']}",
                              "ok" if a["type"] in ("healthy", "insufficient") else "err")
 
@@ -2162,6 +2167,7 @@ class App:
         rows = [
             ("OpenRouter", v["openrouter"]["verdict"]),
             ("HuggingFace", v["huggingface"]["verdict"]),
+            ("reasoning model", "yes" if report.get("reasoning_model") else "no"),
             ("bottleneck", a["type"]),
             ("admission control", a["admission"]),
             ("peak out tok/s", f"{a['peak_out_tps']:.0f} @ c={a['peak_conc']}"),

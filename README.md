@@ -418,6 +418,16 @@ Adversariaalsed proovid, mida router ajaks backendi peal, mida ta ise ei halda:
 - **Logprob-fingerprint** — mudeli enesekindlus triviaalsel faktil (proxy täpsusele; informatiivne,
   paljud serverid ei avalda logprobe).
 
+> **🧠 Reasoning-mudelid** (DeepSeek-R1 / Qwen thinking / QwQ jms): kui mudel paneb nähtava vastuse
+> peidetud arutlusesse ja väike token-eelarve kulub sellele täielikult, oleks `content` tühi ja
+> testid kukuksid valelt. Tööriist **tuvastab reasoning-mudeli mõlemas levinud vormis** — eraldi
+> `reasoning_content`/`reasoning` väljana (nt hosted routerid) **ja** otse `content`-is `<think>`
+> siltidena (levinud kohalike serverite — vLLM / llama.cpp / SGLang — juures), sh kui token-eelarve
+> ei jõua sulgevat `</think>` silti kätte saada (poolelijäänud arutlus loetakse tervikuna
+> reasoning'uks, mitte vastuseks). **Loeb reasoning-tokenid token-aususe hulka** (thinking-mudelit ei
+> süüdistata inflatsioonis) ja annab korrektsus-/kvaliteedi-proovidele **laiendatud eelarve** +
+> eemaldab `<think>`, et jõuda nähtava vastuseni. Raportis on märge "🧠 reasoning model".
+
 ### 3. Paralleelsuse sweep — pudelikaela otsing
 
 Käib läbi paralleelsuse tasemed (nt 1,4,8,16,32) realistliku päringukujuga ja mõõdab igal tasemel
