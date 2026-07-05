@@ -28,6 +28,9 @@ rasket Qt-installi) ja lisaks boonusena käsurea-liides skriptimiseks.
   töötava päringusuuruse**. Vt [Optimum finder](#optimum-finder).
 - ⏳ **Soak-test** – hoiab fikseeritud koormust N minutit ja mõõdab **püsivat tokenit sisse/välja
   tunnis** (+ kas läbilaskevõime püsib stabiilne). Toetab **TheEye päris-koormuse** kordamist. Vt [Soak-test](#soak-test).
+- 🚀 **Capacity** – eraldi tab, mis **tõstab concurrency't astmeliselt (1→2→4→…)** ja leiab **tipp-püsiva
+  tokenit/minutis** — endpoint'i võimsuse **lae** ja küllastuspunkti. Valikuline **Target tok/min →
+  PASS/FAIL**. Vt [Capacity](#capacity-tokmin-lagi).
 - 🧪 **Model fit (Openclaw / Hermes)** – eraldi tab, mis hindab **kas mudel sobib agentseks
   kasutuseks**: Hermes tööriista-kutsed, struktuurne JSON, juhiste järgimine → verdikt
   SOBIB / PIIRIPEAL / EI SOBI. Vt [Model fit](#model-fit-openclaw--hermes).
@@ -344,6 +347,45 @@ Tagasilükkamised (429/503) eristatakse "kõvadest" vigadest (timeout, connectio
 > töökoormuse kujust (sisend/väljund suhe): RAG-koormus annab palju tokenit **sisse**, chat/agentic
 > rohkem **välja**.
 
+## Capacity (tok/min lagi)
+
+**Capacity**-tab vastab ühele küsimusele: **kui palju tokeneid minutis see endpoint päriselt suudab?**
+See on võimsuse **lagi** — number, mille paned kirja SLA-sse või mahuplaneerimise dokumenti.
+
+Erinevus teistest tabidest:
+
+| Tab | Mida teeb |
+|-----|-----------|
+| **Optimum finder** | kiire sweep → parim concurrency, hetkeline tipp-tok/s |
+| **Soak** | *fikseeritud* concurrency, hoiab 30 min → tokenit/**tunnis** (vastupidavus) |
+| **Capacity** | *tõstab* concurrency't astmeliselt → tipp-püsiv tokenit/**minutis** (lagi) |
+
+Kuidas töötab:
+
+- **Ramp:** concurrency käib astmeti **1 → 2 → 4 → 8 → … → Max concurrency**. Igal astmel hoiab test
+  selle arvu päringuid pidevalt õhus **"Window / step"** sekundit (vaikimisi 40 s).
+- **Steady-state mõõtmine:** iga akna esimene ~kolmandik visatakse ära (järjekorra täitumine, külm
+  KV-cache), ülejäänu pealt mõõdetakse **IN / OUT / TOTAL tokenit minutis**.
+- **Saturatsiooni tuvastus** — ramp peatub varakult, kui:
+  - läbilaskevõime **platoole jõuab** (concurrency lisamine ei tõsta enam tok/min, < 8% kasvu), **või**
+  - server hakkab **tagasi lükkama** (429/503 — admission-limiit käes), **või**
+  - tekivad **kõvad vead/timeout'id** või **väljund kärbitakse** (dekodeerimine küllastunud).
+- **Tulemus:** **tipp-püsiv TOTAL tok/min** (= võimsus), **millisel concurrency'l** see saavutati, ja
+  **miks** ramp peatus. Kui ramp jõuab max concurrency'ni ilma peatumata, öeldakse *"still climbing —
+  tõsta Max concurrency"* (tegelik lagi on kõrgemal).
+- **Graafik:** tok/min iga concurrency-taseme kohta — näed **küllastuskõverat** ja põlve (knee).
+
+**Target tok/min (valikuline):** kui täidad nõutava võimsuse (nt lepingu TPM või tippkoormuse, mida pead
+teenindama), lisab tulemus **PASS/FAIL** verdikti — kas mõõdetud tipp-võimsus täidab selle. Tühjaks
+jättes lihtsalt mõõdab lae.
+
+**Näide:** Max concurrency 64, sisend 1000 / väljund 500, 40 s/samm → ramp 1→2→4→8→16→32→64, näed nt
+"CAPACITY 31.2 M/min @ c=8 · saturatsioon: server hakkas c=32 juures 429-ga tagasi lükkama". Kui panid
+Target 5 M/min → **✅ PASS**.
+
+> ⚠️ Nagu Optimum finder ja Soak, on ka Capacity **koormustest** — jooksuta ainult serverite vastu,
+> mida sa omad või milleks sul on luba.
+
 ## Model fit (agentne sobivus)
 
 Eraldi **Model fit** tab ei mõõda kiirust vaid **võimekust**: kas mudel sobib agentseks
@@ -551,12 +593,12 @@ skannimine võib olla seadusevastane.
 
 ```
 llmscanner/
-├── gui.py        # Tkinter GUI (peamine) — Connection / Benchmark / Optimum finder / Soak / Model fit / Provider fit / Scan / History
+├── gui.py        # Tkinter GUI (peamine) — Connection / Benchmark / Optimum finder / Soak / Capacity / Model fit / Provider fit / Scan / History
 ├── cli.py        # käsurea-liides (boonus, vajab rich)
 ├── client.py     # OpenAI-ühilduv async klient (http/https, base_path) + ajamõõtmine
 ├── detect.py     # serveri tuvastus / fingerprint + smart_detect (kandidaatide proovimine)
 ├── scanner.py    # võrguskann + portide tuvastus
-├── benchmark.py  # latentsus / koormus / kontekst / sanity / sweep + find_optima + soak_test + suitability_test (model fit) + provider_readiness
+├── benchmark.py  # latentsus / koormus / kontekst / sanity / sweep + find_optima + soak_test + capacity_test + suitability_test (model fit) + provider_readiness
 ├── store.py      # SQLite püsivus: salvestatud hostid + kõik tulemused
 ├── icon.py       # rakenduse ikooni (sinine V) genereerimine
 ├── assets/

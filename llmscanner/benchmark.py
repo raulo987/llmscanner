@@ -857,6 +857,187 @@ async def soak_test(client: LLMClient, model: Optional[str], *, concurrency: int
     return snapshot()
 
 
+def _capacity_levels(max_conc: int) -> list[int]:
+    """Concurrency ramp for the capacity test: 1, 2, 4, 8, … up to `max_conc`
+    (inclusive). Doubling keeps the number of steps small while still bracketing
+    the saturation knee closely enough."""
+    max_conc = max(1, int(max_conc))
+    levels = []
+    c = 1
+    while c < max_conc:
+        levels.append(c)
+        c *= 2
+    levels.append(max_conc)
+    return sorted(set(levels))
+
+
+async def capacity_test(client: LLMClient, model: Optional[str], *,
+                        max_conc: int = 64, ctx_tokens: int = 1000,
+                        gen_tokens: int = 500, window_s: float = 40.0,
+                        warmup_frac: float = 0.35, settle_s: float = 3.0,
+                        target_per_min: float = 0.0, plateau_frac: float = 0.08,
+                        plateau_patience: int = 2, distinct_prefix: bool = True,
+                        force_output: bool = True, levels: Optional[list[int]] = None,
+                        on_progress: Optional[Callable[[dict], None]] = None) -> dict:
+    """Find the endpoint's sustainable token *capacity* in tokens-per-minute by
+    ramping concurrency and measuring the delivered rate at each step.
+
+    For each concurrency level (1, 2, 4, …, `max_conc`) it holds that many
+    requests continuously in flight for `window_s` seconds, ignores the first
+    `warmup_frac` of the window (queue fill / cold KV cache), and measures the
+    steady-state in/out/total tokens-per-minute over the remainder. It climbs
+    until throughput plateaus (gain < `plateau_frac` for `plateau_patience`
+    consecutive steps), the server starts rejecting (429/503) or hard-erroring,
+    or the max level is reached. The **peak healthy total tok/min** is the
+    reported capacity; the level achieving it is the recommended operating point.
+
+    If `target_per_min > 0`, the run also yields a PASS/FAIL: does the measured
+    peak capacity meet the required tokens-per-minute? Emits a snapshot after each
+    step via `on_progress` (fields: `steps`, `current`, `peak`, `phase`, `status`).
+    """
+    if not model:
+        try:
+            models = await client.list_models()
+            model = models[0] if models else None
+        except Exception:
+            model = None
+        if not model:
+            raise RuntimeError("No model specified and model listing failed.")
+
+    ramp = sorted({c for c in (levels or _capacity_levels(max_conc)) if c >= 1})
+    salt_tokens = 64
+
+    def build_body(in_tokens: int) -> str:
+        salt = (_unique_prefix(salt_tokens) + "\n") if distinct_prefix else ""
+        budget = max(1, in_tokens - (salt_tokens if distinct_prefix else 0))
+        return (salt + _filler(budget, lead=random.randint(0, 10 ** 9)) +
+                "\n\nUsing the text above as context, write a long, detailed "
+                "continuation. Keep writing and do not stop.")
+
+    async def run_step(conc: int) -> dict:
+        # (t_rel, ok, ptoks, ctoks, ttft, total_time, est, err, req_out)
+        recs: list[tuple] = []
+        start = time.perf_counter()
+        deadline = start + max(1.0, window_s)
+
+        async def worker():
+            while time.perf_counter() < deadline:
+                r = await client.generate(model=model, prompt=build_body(ctx_tokens),
+                                          max_tokens=gen_tokens, force_output=force_output)
+                recs.append((time.perf_counter() - start, r.ok, r.prompt_tokens,
+                             r.completion_tokens, r.ttft, r.total_time, r.est_tokens,
+                             "" if r.ok else r.error, gen_tokens))
+                if not r.ok:
+                    await asyncio.sleep(0.5)
+
+        workers = [asyncio.create_task(worker()) for _ in range(conc)]
+        await asyncio.gather(*workers)
+
+        # Steady-state window: drop the warm-up head, then rate = tokens from
+        # requests that COMPLETED inside [t0, t1] divided by that span.
+        t0 = window_s * warmup_frac
+        t1 = window_s
+        span = max(t1 - t0, 1e-9)
+        win = [x for x in recs if t0 <= x[0] <= t1]
+        ok = [x for x in win if x[1]]
+        errs_all = [x[7] for x in recs if not x[1]]              # errors over whole step
+        rejected = sum(1 for e in errs_all if _is_rejection(e))
+        hard_err = len(errs_all) - rejected
+        tin = sum(x[2] for x in ok)
+        tout = sum(x[3] for x in ok)
+        in_pm = tin / span * 60.0
+        out_pm = tout / span * 60.0
+        tpots = [(x[5] - x[4]) / (x[3] - 1) for x in ok if x[3] > 1 and x[5] > x[4]]
+        undergen = (sum(1 for x in ok if x[8] >= 8 and x[3] < 0.5 * x[8]) / len(ok)) if ok else 0.0
+        est_frac = (sum(1 for x in ok if x[6]) / len(ok)) if ok else 0.0
+        req_total = len(recs)
+        rejected_frac = (rejected / req_total) if req_total else 0.0
+        hard_err_frac = (hard_err / req_total) if req_total else 0.0
+        # A step is "healthy" (its rate is genuinely sustainable) only if the
+        # server wasn't shedding load or truncating output to keep up.
+        healthy = (len(ok) > 0 and rejected_frac < 0.05 and hard_err_frac < 0.02
+                   and undergen < 0.30)
+        return {
+            "conc": conc, "in_per_min": in_pm, "out_per_min": out_pm,
+            "total_per_min": in_pm + out_pm, "requests": req_total,
+            "success": len(ok), "win_success": len(ok),
+            "lat_p50": _pct([x[5] for x in ok], 0.5),
+            "lat_p95": _pct([x[5] for x in ok], 0.95),
+            "ttft_p95": _pct([x[4] for x in ok], 0.95),
+            "tpot_ms": 1000.0 * statistics.mean(tpots) if tpots else 0.0,
+            "rejected": rejected, "hard_err": hard_err,
+            "rejected_frac": rejected_frac, "hard_err_frac": hard_err_frac,
+            "undergen_frac": undergen, "est_frac": est_frac,
+            "gen_actual": (tout / len(ok)) if ok else 0.0,
+            "healthy": healthy, "error_samples": errs_all[:3],
+        }
+
+    steps: list[dict] = []
+    peak: Optional[dict] = None
+    plateau = 0
+    saturation = ""
+    emit = on_progress or (lambda *_: None)
+
+    for i, conc in enumerate(ramp):
+        emit({"steps": steps, "current": None, "peak": peak, "phase": "step_start",
+              "status": f"c={conc}: measuring {window_s:g}s window…", "conc": conc,
+              "target_per_min": target_per_min})
+        if settle_s > 0 and i > 0:
+            await asyncio.sleep(settle_s)
+        s = await run_step(conc)
+        steps.append(s)
+        emit({"steps": steps, "current": s, "peak": peak, "phase": "step_done",
+              "status": f"c={conc}: {s['total_per_min']:,.0f} tok/min", "conc": conc,
+              "target_per_min": target_per_min})
+
+        if not s["healthy"]:
+            # Server is rejecting / erroring / truncating — we're past capacity.
+            if s["rejected_frac"] >= 0.05:
+                saturation = (f"server started rejecting (429/503) at c={conc} "
+                              f"({s['rejected_frac'] * 100:.0f}% refused) — admission limit reached")
+            elif s["hard_err_frac"] >= 0.02:
+                saturation = (f"hard errors/timeouts at c={conc} "
+                              f"({s['hard_err_frac'] * 100:.0f}%) — endpoint overloaded")
+            else:
+                saturation = (f"output truncated at c={conc} "
+                              f"(under-gen {s['undergen_frac'] * 100:.0f}%) — decode saturated")
+            break
+
+        if peak is None or s["total_per_min"] > peak["total_per_min"] * (1 + plateau_frac):
+            peak = s
+            plateau = 0
+        else:
+            if s["total_per_min"] > (peak["total_per_min"] if peak else 0):
+                peak = s   # marginal gain still counts as the best number
+            plateau += 1
+            if plateau >= plateau_patience:
+                saturation = (f"throughput plateaued at c={conc} — adding concurrency "
+                              f"stopped raising tok/min (< {plateau_frac * 100:.0f}% gain)")
+                break
+
+    if not saturation:
+        last = ramp[-1] if ramp else 0
+        saturation = (f"still climbing at the max concurrency c={last} — raise "
+                      f"‘Max concurrency’ to find the true ceiling")
+
+    peak_pm = peak["total_per_min"] if peak else 0.0
+    result = {
+        "model": model, "steps": steps, "peak": peak, "ramp": ramp,
+        "window_s": window_s, "warmup_frac": warmup_frac,
+        "ctx_tokens": ctx_tokens, "gen_tokens": gen_tokens,
+        "peak_total_per_min": peak_pm,
+        "peak_in_per_min": peak["in_per_min"] if peak else 0.0,
+        "peak_out_per_min": peak["out_per_min"] if peak else 0.0,
+        "peak_conc": peak["conc"] if peak else 0,
+        "saturation": saturation,
+        "target_per_min": target_per_min,
+        "target_met": (peak_pm >= target_per_min) if target_per_min > 0 else None,
+        "phase": "done", "status": "done",
+    }
+    emit(result)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Model-fit suitability probe (Openclaw / Hermes)
 #

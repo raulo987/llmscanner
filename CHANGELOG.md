@@ -6,6 +6,21 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
+### 2026-07-06 (uus Capacity-tab — tok/min lagi)
+- **Uus "Capacity" tab (Soak ja Model-fit vahel)** — mõõdab endpoint'i **tipp-püsiva tokenit/minutis**
+  ehk võimsuse **lae**. Erinevalt Soak-ist (fikseeritud concurrency → tok/tunnis) **tõstab Capacity
+  concurrency't astmeliselt (1 → 2 → 4 → … → Max concurrency)**, hoiab igal astmel koormust
+  "Window / step" sekundit (vaikimisi 40 s), viskab akna esimese ~kolmandiku ära (warm-up) ja mõõdab
+  ülejäänu pealt steady-state IN/OUT/TOTAL tok/min.
+- **Auto-saturatsioon:** ramp peatub varakult, kui läbilaskevõime platoole jõuab (< 8% kasvu),
+  server hakkab tagasi lükkama (429/503), tekivad kõvad vead/timeout'id või väljund kärbitakse.
+  Tulemus näitab **tipp-TOTAL tok/min, millisel concurrency'l** ja **miks ramp peatus** (+ tok/h
+  projektsioon ja küllastuskõvera graafik). Kui jõuab max-ni ilma peatumata → *"still climbing"*.
+- **Valikuline "Target tok/min" väli → PASS/FAIL** verdikt: kas mõõdetud tipp-võimsus täidab nõutava
+  tokenit/minutis (nt lepingu TPM). Tühjaks jättes lihtsalt mõõdab lae.
+- Backend: `capacity_test()` + `_capacity_levels()` (benchmark.py); GUI: `_build_capacity_tab` +
+  handlerid, eestikeelsed tõlked, Cmd+R tugi. Nagu Optimum finder / Soak, on ka Capacity koormustest.
+
 ### 2026-07-06 (Hermes tööriista-proov nüüd tagavara, mitte alati)
 - **Provider-fit'i "Tool calling (Hermes prompt)" kontroll on nüüd TAGAVARA** — see jookseb ainult siis,
   kui natiivne `tools` API-kontroll (mis gate'ib verdikti) ei tööta. Natiivse tööriista-kutsega mudel

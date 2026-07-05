@@ -59,7 +59,8 @@ LANG = {
 TR_ET = {
     # tabs
     "Connection": "Ühendus", "Benchmark": "Jõudlus", "Optimum finder": "Optimeerija",
-    "Soak": "Püsikoormus", "Model fit": "Mudeli sobivus", "Provider fit": "Pakkuja sobivus",
+    "Soak": "Püsikoormus", "Capacity": "Võimsus",
+    "Model fit": "Mudeli sobivus", "Provider fit": "Pakkuja sobivus",
     "Network scan": "Võrguskann", "History": "Ajalugu",
     # section titles
     "Saved hosts (quick-select)": "Salvestatud hostid (kiirvalik)",
@@ -67,6 +68,7 @@ TR_ET = {
     "Tests to run": "Käivitatavad testid", "What to find": "Mida otsida",
     "Measured operating points": "Mõõdetud tööpunktid",
     "Sustained throughput (tokens / hour)": "Püsiv läbilaskevõime (tokenit / tunnis)",
+    "Token capacity (peak tokens / minute)": "Token-võimsus (tipp tokenit / minutis)",
     "Live": "Reaalajas",
     "Model fit — Openclaw / Hermes suitability": "Mudeli sobivus — Openclaw / Hermes",
     "Provider fit — OpenRouter / HuggingFace readiness":
@@ -89,11 +91,14 @@ TR_ET = {
     "Requests per worker": "Päringuid töötaja kohta", "Settle pause (s)": "Settimispaus (s)",
     "Sweep concurrencies": "Sweep paralleelsused", "Throughput runs": "Läbilaskevõime jooksud",
     "TTFT p95 SLA (s)": "TTFT p95 SLA (s)",
+    "Max concurrency": "Max paralleelsus", "Window / step (s)": "Aken / samm (s)",
+    "Target tok/min (optional)": "Siht tok/min (valikuline)",
     # buttons
     "Detect server": "Tuvasta server", "List models": "Loetle mudelid", "Load": "Lae",
     "Save current…": "Salvesta praegune…", "Delete": "Kustuta",
     "Run benchmark": "Käivita benchmark", "Find optima": "Leia optimum",
-    "Run soak test": "Käivita soak-test", "Run model-fit test": "Käivita model-fit test",
+    "Run soak test": "Käivita soak-test", "Run capacity test": "Käivita võimsus-test",
+    "Run model-fit test": "Käivita model-fit test",
     "Run provider-fit test": "Käivita provider-fit test", "Scan network": "Skanni võrku",
     "Stop": "Peata", "Cancel": "Tühista", "Clear": "Tühjenda", "Clear all": "Tühjenda kõik",
     "Clear view": "Tühjenda vaade", "Copy to clipboard": "Kopeeri lõikelauale",
@@ -116,6 +121,7 @@ TR_ET = {
     "Overload probe (+25%) — check clean admission control":
         "Ülekoormuse proovik (+25%) — kontrolli puhast admission control'i",
     "Set the load and press ‘Run soak test’.": "Sea koormus ja vajuta ‘Käivita soak-test’.",
+    "Set the load and press ‘Run capacity test’.": "Sea koormus ja vajuta ‘Käivita võimsus-test’.",
     "Pick the checks and press ‘Run model-fit test’.":
         "Vali kontrollid ja vajuta ‘Käivita model-fit test’.",
     "Set the traffic shape and press ‘Run provider-fit test’.":
@@ -387,6 +393,27 @@ INFO = {
         "• clean 429/503 for the excess → proper backpressure ✓\n"
         "• no rejections but output truncated / degraded → no admission control ⚠\n"
         "• timeouts / hard errors → the server breaks under overload ✗"),
+    # ---- Capacity (tok/min ceiling) ----
+    "cap_max_conc": (
+        "The highest concurrency to ramp up to. The test steps 1 → 2 → 4 → … up to this "
+        "value, measuring the delivered tok/min at each level, and stops early once "
+        "throughput plateaus or the server starts rejecting. If the run ends with 'still "
+        "climbing', raise this to find the true ceiling."),
+    "cap_in": (
+        "Input (prompt) tokens per request — the 'question' size. Use what's typical of "
+        "your real traffic. Total capacity counts prompt + completion tokens, so a larger "
+        "input raises the tok/min figure (more prefill work per request)."),
+    "cap_out": (
+        "Max output tokens per request — the 'answer' size, forced with ignore_eos so every "
+        "request decodes this many. Larger output = more decode work, fewer requests/min."),
+    "cap_window": (
+        "How long to hold each concurrency level, in seconds. The first ~third is discarded "
+        "as warm-up (queue fill / cold KV cache); the steady-state tok/min is measured over "
+        "the rest. 30–60 s per step gives a stable number without dragging the whole ramp out."),
+    "cap_target": (
+        "Optional. Your required capacity in tokens per minute (e.g. a contracted TPM or the "
+        "peak load you must serve). If set, the result adds a PASS/FAIL: does the measured "
+        "peak capacity meet it? Leave empty to just measure the ceiling."),
     # ---- Model fit (Openclaw / Hermes) ----
     "fit_tool": (
         "Function calling. The model is given tools via the native OpenAI `tools` "
@@ -915,11 +942,11 @@ class App:
         widgets update themselves; the custom tk canvas/text/tree do not."""
         self.pal = _palette()
         self._style_trees()
-        for name in ("bench_log", "opt_log", "soak_log", "fit_log", "ready_log"):
+        for name in ("bench_log", "opt_log", "soak_log", "capacity_log", "fit_log", "ready_log"):
             log = getattr(self, name, None)
             if log is not None:
                 log.retheme(self.pal)
-        for name in ("bench_chart", "opt_chart", "soak_chart", "ready_chart"):
+        for name in ("bench_chart", "opt_chart", "soak_chart", "capacity_chart", "ready_chart"):
             ch = getattr(self, name, None)
             if ch is not None:
                 try:
@@ -1020,6 +1047,7 @@ class App:
         self.tab_bench = self.tabview.add(self.L("Benchmark"))
         self.tab_opt = self.tabview.add(self.L("Optimum finder"))
         self.tab_soak = self.tabview.add(self.L("Soak"))
+        self.tab_capacity = self.tabview.add(self.L("Capacity"))
         self.tab_fit = self.tabview.add(self.L("Model fit"))
         self.tab_ready = self.tabview.add(self.L("Provider fit"))
         self.tab_scan = self.tabview.add(self.L("Network scan"))
@@ -1029,6 +1057,7 @@ class App:
         self._build_bench_tab()
         self._build_opt_tab()
         self._build_soak_tab()
+        self._build_capacity_tab()
         self._build_modelfit_tab()
         self._build_readiness_tab()
         self._build_scan_tab()
@@ -1806,6 +1835,203 @@ class App:
         for e in s.get("error_samples", []):
             self.soak_log.write(f"   error: {e[:70]}", "err")
         self._set_status("Soak test complete.")
+
+    # ---------------------------------------------------------- Capacity tab
+    def _build_capacity_tab(self):
+        self.var_cap_maxconc = tk.StringVar(value="64")
+        self.var_cap_in = tk.StringVar(value="1000")
+        self.var_cap_out = tk.StringVar(value="500")
+        self.var_cap_window = tk.StringVar(value="40")
+        self.var_cap_target = tk.StringVar(value="")
+
+        sec, top = self._section(self.tab_capacity, "Token capacity (peak tokens / minute)")
+        sec.pack(fill="x", padx=12, pady=(10, 6))
+
+        def field(r, c, label, var, info, w=90):
+            self._lbl(top, label, info).grid(row=r, column=c, sticky="e", padx=(12, 4), pady=5)
+            ctk.CTkEntry(top, textvariable=var, width=w).grid(row=r, column=c + 1, sticky="w", pady=5)
+
+        field(0, 0, "Max concurrency", self.var_cap_maxconc, INFO["cap_max_conc"])
+        field(0, 2, "Window / step (s)", self.var_cap_window, INFO["cap_window"])
+        field(1, 0, "Input tokens / req", self.var_cap_in, INFO["cap_in"])
+        field(1, 2, "Output tokens / req", self.var_cap_out, INFO["cap_out"])
+        field(2, 0, "Target tok/min (optional)", self.var_cap_target, INFO["cap_target"], w=110)
+
+        runbar = ctk.CTkFrame(self.tab_capacity, fg_color="transparent")
+        runbar.pack(fill="x", padx=12, pady=4)
+        self.btn_capacity = ctk.CTkButton(runbar, text=self.L("Run capacity test"),
+                                          command=self.on_run_capacity)
+        self.btn_capacity.pack(side="left")
+        btn_cap_cancel = ctk.CTkButton(runbar, text=self.L("Stop"), width=80, state="disabled",
+                                       fg_color="#b04a4a", hover_color="#963c3c",
+                                       command=self.cancel_current)
+        btn_cap_cancel.pack(side="left", padx=8)
+        self._cancel_btns.append(btn_cap_cancel)
+        ctk.CTkLabel(runbar, text="Ramps concurrency (1→2→4→…) and reports the peak "
+                                  "sustainable tok/min — the endpoint's capacity ceiling.",
+                     text_color=self.pal["sub"]).pack(side="left", padx=10)
+
+        self.capacity_readout = ctk.CTkLabel(
+            self.tab_capacity, text=self.L("Set the load and press ‘Run capacity test’."),
+            anchor="w", justify="left", font=ctk.CTkFont(size=15, weight="bold"))
+        self.capacity_readout.pack(fill="x", padx=16, pady=(2, 4))
+
+        sec3, body = self._section(self.tab_capacity, "Live")
+        sec3.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        split = ttk.PanedWindow(body, orient="horizontal")
+        split.pack(fill="both", expand=True)
+        left = ctk.CTkFrame(split, fg_color="transparent")
+        right = ctk.CTkFrame(split)
+        split.add(left, weight=3)
+        split.add(right, weight=2)
+        self.capacity_chart = ChartCanvas(left, height=220)
+        self.capacity_chart.pack(fill="both", expand=True)
+        self.capacity_log = LiveLog(right, self.pal, fg_color="transparent")
+        self.capacity_log.pack(fill="both", expand=True)
+
+    @staticmethod
+    def _fmt_per_min(v: float) -> str:
+        if v >= 1e9:
+            return f"{v / 1e9:.2f} B/min"
+        if v >= 1e6:
+            return f"{v / 1e6:.2f} M/min"
+        if v >= 1e3:
+            return f"{v / 1e3:.1f} K/min"
+        return f"{v:.0f}/min"
+
+    def on_run_capacity(self):
+        try:
+            target = resolve_target(self.var_host.get(), self.var_port.get())
+            tgt_raw = self.var_cap_target.get().strip()
+            cfg = {
+                "max_conc": max(1, int(self.var_cap_maxconc.get())),
+                "ctx_tokens": max(1, int(self.var_cap_in.get())),
+                "gen_tokens": max(1, int(self.var_cap_out.get())),
+                "window_s": max(3.0, float(self.var_cap_window.get())),
+                "target_per_min": max(0.0, float(tgt_raw)) if tgt_raw else 0.0,
+                "timeout": float(self.var_timeout.get() or 95),
+            }
+        except ValueError as e:
+            return self._error(ValueError(f"Invalid number: {e}"))
+
+        client = LLMClient.from_target(
+            target, api_key=self.var_apikey.get().strip() or "EMPTY",
+            timeout=cfg["timeout"], endpoint=self.var_endpoint.get())
+        self._remember_endpoint(target.host, target.port)
+        self.capacity_chart.clear()
+        self.capacity_log.clear()
+        ramp = B._capacity_levels(cfg["max_conc"])
+        tdesc = (f" · target {self._fmt_per_min(cfg['target_per_min'])}"
+                 if cfg["target_per_min"] else "")
+        self.capacity_log.write(f"▶ Capacity · {client.base_url}", "head")
+        self.capacity_log.write(
+            f"        ramp c={'→'.join(str(c) for c in ramp)} · in {cfg['ctx_tokens']} / "
+            f"out {cfg['gen_tokens']} tok · {cfg['window_s']:g}s/step{tdesc}", "dim")
+        self.capacity_readout.configure(text="Starting capacity ramp…")
+
+        def on_progress(snap):
+            self.post(lambda s=snap: self._capacity_progress(s))
+
+        self.run_async(
+            B.capacity_test(client, self._resolved_model(),
+                            max_conc=cfg["max_conc"], ctx_tokens=cfg["ctx_tokens"],
+                            gen_tokens=cfg["gen_tokens"], window_s=cfg["window_s"],
+                            target_per_min=cfg["target_per_min"], on_progress=on_progress),
+            self._capacity_done, status="Capacity test running…")
+
+    def _capacity_plot(self, steps: list):
+        if steps:
+            self.capacity_chart.plot(
+                [(f"c{s['conc']}", s["total_per_min"]) for s in steps],
+                title="total tok/min per concurrency level", unit="tok/min")
+
+    def _capacity_progress(self, s: dict):
+        phase = s.get("phase")
+        steps = s.get("steps", [])
+        if phase == "step_start":
+            self.capacity_readout.configure(
+                text=f"⏱ measuring c={s.get('conc')} …   "
+                     + (f"best so far {self._fmt_per_min(s['peak']['total_per_min'])} "
+                        f"@ c={s['peak']['conc']}" if s.get("peak") else ""))
+            self._set_status(s.get("status", "Capacity test running…"))
+            return
+        # step_done (or done): a level finished — log it and redraw the curve.
+        cur = s.get("current")
+        if cur:
+            tag = "ok" if cur["healthy"] else "err"
+            flags = ""
+            if cur["rejected"]:
+                flags += f" · {cur['rejected']} rejected(429)"
+            if cur["hard_err"]:
+                flags += f" · {cur['hard_err']} errored"
+            if cur["undergen_frac"] >= 0.1:
+                flags += f" · under-gen {cur['undergen_frac'] * 100:.0f}%"
+            self.capacity_log.write(
+                f"c={cur['conc']:>3}  {self._fmt_per_min(cur['total_per_min'])}  "
+                f"(out {self._fmt_per_min(cur['out_per_min'])} · p95 {cur['lat_p95']:.1f}s){flags}",
+                tag)
+        self._capacity_plot(steps)
+        # Running peak = best HEALTHY step so far (matches the backend's final
+        # peak). Compute it from `steps` (which already includes the step that
+        # just finished) rather than the snapshot's `peak`, which is emitted a
+        # step behind and so would lag the readout by one level.
+        healthy = [x for x in steps if x.get("healthy")]
+        peak = max(healthy, key=lambda x: x["total_per_min"]) if healthy else None
+        if peak:
+            self.capacity_readout.configure(
+                text=f"Peak so far: {self._fmt_per_min(peak['total_per_min'])} @ c={peak['conc']}   "
+                     f"(out {self._fmt_per_min(peak['out_per_min'])} · "
+                     f"in {self._fmt_per_min(peak['in_per_min'])})")
+        self._set_status(s.get("status", "Capacity test running…"))
+
+    def _capacity_done(self, s: dict):
+        self._capacity_plot(s.get("steps", []))
+        peak_pm = s.get("peak_total_per_min", 0.0)
+        self.capacity_log.write("✓ Capacity ramp complete", "ok")
+        if not s.get("peak"):
+            # Not one level held up (server rejected/failed from the very start),
+            # so there is no sustainable capacity number to report.
+            self.capacity_readout.configure(
+                text="NO SUSTAINABLE CAPACITY — the endpoint rejected or failed "
+                     "from the lowest concurrency level.")
+            self.capacity_log.write(f"◆ {s.get('saturation', '')}", "err")
+            if s.get("target_per_min"):
+                self.capacity_log.write(
+                    f"❌ FAIL — target {self._fmt_per_min(s['target_per_min'])}: "
+                    f"no capacity could be sustained", "err")
+            self._set_status("Capacity test complete — no sustainable capacity.")
+            return
+        self.capacity_readout.configure(
+            text=f"CAPACITY  {self._fmt_per_min(peak_pm)}  @ c={s.get('peak_conc')}   "
+                 f"(out {self._fmt_per_min(s.get('peak_out_per_min', 0))} · "
+                 f"in {self._fmt_per_min(s.get('peak_in_per_min', 0))})")
+        rows = [
+            ("peak total tok/min", f"{peak_pm:,.0f}"),
+            ("peak output tok/min", f"{s.get('peak_out_per_min', 0):,.0f}"),
+            ("peak input tok/min", f"{s.get('peak_in_per_min', 0):,.0f}"),
+            ("at concurrency", f"{s.get('peak_conc')}"),
+            ("tokens / hour (total)", self._fmt_per_hour(peak_pm * 60.0)),
+            ("levels tested", "→".join(str(c) for c in s.get("ramp", []))),
+            ("window / step (s)", f"{s.get('window_s', 0):g}"),
+            ("saturation", s.get("saturation", "")),
+        ]
+        self.capacity_log.result(
+            "Token capacity",
+            f"{self._fmt_per_min(peak_pm)} @ c={s.get('peak_conc')}", rows)
+        self.capacity_log.write(f"◆ Saturation: {s.get('saturation', '')}", "dim")
+        tgt = s.get("target_per_min") or 0.0
+        if tgt > 0:
+            met = bool(s.get("target_met"))
+            self.capacity_log.write(
+                f"{'✅ PASS' if met else '❌ FAIL'} — target {self._fmt_per_min(tgt)}: "
+                f"measured peak {self._fmt_per_min(peak_pm)} "
+                f"({'meets' if met else 'below'} required capacity)",
+                "ok" if met else "err")
+        for st in s.get("steps", []):
+            for e in st.get("error_samples", []):
+                self.capacity_log.write(f"   c={st['conc']} error: {e[:64]}", "err")
+                break
+        self._set_status("Capacity test complete.")
 
     # ---------------------------------------------------------- Model fit tab
     def _build_modelfit_tab(self):
@@ -2774,8 +3000,8 @@ class App:
     def _on_cancelled(self):
         self._set_status("Cancelled.")
         for log in (getattr(self, "bench_log", None), getattr(self, "opt_log", None),
-                    getattr(self, "soak_log", None), getattr(self, "fit_log", None),
-                    getattr(self, "ready_log", None)):
+                    getattr(self, "soak_log", None), getattr(self, "capacity_log", None),
+                    getattr(self, "fit_log", None), getattr(self, "ready_log", None)):
             if log is not None:
                 log.write("✗ Cancelled by user", "err")
 
@@ -2812,6 +3038,7 @@ class App:
         runners = {
             "Connection": self.on_detect, "Benchmark": self.on_run_bench,
             "Optimum finder": self.on_run_optima, "Soak": self.on_run_soak,
+            "Capacity": self.on_run_capacity,
             "Model fit": self.on_run_modelfit, "Provider fit": self.on_run_readiness,
             "Network scan": self.on_scan,
         }
@@ -2859,7 +3086,7 @@ class App:
         self._busy = busy
         state = "disabled" if busy else "normal"
         for name in ("btn_detect", "btn_models", "btn_run", "btn_scan",
-                     "btn_opt", "btn_soak", "btn_fit", "btn_ready"):
+                     "btn_opt", "btn_soak", "btn_capacity", "btn_fit", "btn_ready"):
             b = getattr(self, name, None)
             if b is not None:
                 b.configure(state=state)
@@ -2885,7 +3112,8 @@ class App:
     def _error(self, err: Exception):
         self._set_status(f"Error: {err}")
         for log in (getattr(self, "bench_log", None), getattr(self, "opt_log", None),
-                    getattr(self, "soak_log", None), getattr(self, "fit_log", None)):
+                    getattr(self, "soak_log", None), getattr(self, "capacity_log", None),
+                    getattr(self, "fit_log", None)):
             if log is not None:
                 log.write(f"✗ {err}", "err")
         messagebox.showerror(APP_TITLE, str(err))
