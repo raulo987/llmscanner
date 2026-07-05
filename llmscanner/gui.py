@@ -31,6 +31,160 @@ from .util import default_subnet, parse_ports, resolve_target
 
 APP_TITLE = "LLM Scanner — local model tester"
 
+SUPPORT_EMAIL = "support@itteam.eu"
+
+# UI chrome strings for the language switch (English primary, Estonian optional).
+# The main tab UI stays English; this covers the settings bar, the Help window
+# and the status line.
+LANG = {
+    "en": {
+        "help": "❔ Help", "theme": "Theme", "language": "Language",
+        "ready": "Ready.", "help_title": "Help & Support",
+        "close": "Close",
+        "theme_system": "System", "theme_light": "Light", "theme_dark": "Dark",
+    },
+    "et": {
+        "help": "❔ Abi", "theme": "Teema", "language": "Keel",
+        "ready": "Valmis.", "help_title": "Abi ja tugi",
+        "close": "Sulge",
+        "theme_system": "Süsteem", "theme_light": "Hele", "theme_dark": "Tume",
+    },
+}
+
+
+# Estonian translations for the visible tab UI, keyed by the English string
+# (so any untranslated literal falls back to English automatically). Covers tab
+# names, section titles, field labels, primary buttons and checkboxes; the ⓘ
+# deep-help tooltips and long intro paragraphs stay English.
+TR_ET = {
+    # tabs
+    "Connection": "Ühendus", "Benchmark": "Jõudlus", "Optimum finder": "Optimeerija",
+    "Soak": "Püsikoormus", "Model fit": "Mudeli sobivus", "Provider fit": "Pakkuja sobivus",
+    "Network scan": "Võrguskann", "History": "Ajalugu",
+    # section titles
+    "Saved hosts (quick-select)": "Salvestatud hostid (kiirvalik)",
+    "Server info": "Serveri info", "Parameters": "Parameetrid",
+    "Tests to run": "Käivitatavad testid", "What to find": "Mida otsida",
+    "Measured operating points": "Mõõdetud tööpunktid",
+    "Sustained throughput (tokens / hour)": "Püsiv läbilaskevõime (tokenit / tunnis)",
+    "Live": "Reaalajas",
+    "Model fit — Openclaw / Hermes suitability": "Mudeli sobivus — Openclaw / Hermes",
+    "Provider fit — OpenRouter / HuggingFace readiness":
+        "Pakkuja sobivus — OpenRouter / HuggingFace valmidus",
+    "Scan settings": "Skanni seaded", "Discovered servers": "Leitud serverid",
+    # field labels
+    "API key": "API võti", "Concurrency": "Paralleelsus", "Endpoint": "Otspunkt",
+    "Filter:": "Filter:", "Host / IP": "Host / IP", "Model": "Mudel", "Port": "Port",
+    "Ports": "Pordid", "Subnet (CIDR)": "Alamvõrk (CIDR)", "Timeout (s)": "Timeout (s)",
+    "Concurrency levels": "Paralleelsuse tasemed", "Concurrency sweep": "Paralleelsuse sweep",
+    "Concurrency-phase ctx": "Paralleelsuse-faasi ctx", "Context probe (tok)": "Konteksti proov (tok)",
+    "Context tokens": "Konteksti tokenid", "Duration (min)": "Kestus (min)",
+    "Gen lengths (tok)": "Gen pikkused (tok)", "Gen tokens / req": "Gen tokenit / päring",
+    "Input tokens / req": "Sisend-tokenit / päring", "Load concurrency": "Koormuse paralleelsus",
+    "Load requests": "Koormuse päringud", "Max context cap": "Max konteksti lagi",
+    "Max ctx probe": "Max ctx proov", "Max output tokens": "Max väljund-tokenit",
+    "Min success %": "Min edu %", "Output tokens / req": "Väljund-tokenit / päring",
+    "Profile concurrency": "Profiili paralleelsus", "Profiles in/out": "Profiilid sisse/välja",
+    "Request sizes (tok)": "Päringu suurused (tok)", "Requests / level": "Päringuid / tase",
+    "Requests per worker": "Päringuid töötaja kohta", "Settle pause (s)": "Settimispaus (s)",
+    "Sweep concurrencies": "Sweep paralleelsused", "Throughput runs": "Läbilaskevõime jooksud",
+    "TTFT p95 SLA (s)": "TTFT p95 SLA (s)",
+    # buttons
+    "Detect server": "Tuvasta server", "List models": "Loetle mudelid", "Load": "Lae",
+    "Save current…": "Salvesta praegune…", "Delete": "Kustuta",
+    "Run benchmark": "Käivita benchmark", "Find optima": "Leia optimum",
+    "Run soak test": "Käivita soak-test", "Run model-fit test": "Käivita model-fit test",
+    "Run provider-fit test": "Käivita provider-fit test", "Scan network": "Skanni võrku",
+    "Stop": "Peata", "Cancel": "Tühista", "Clear": "Tühjenda", "Clear all": "Tühjenda kõik",
+    "Clear view": "Tühjenda vaade", "Copy to clipboard": "Kopeeri lõikelauale",
+    "Export CSV…": "Ekspordi CSV…", "Refresh": "Värskenda",
+    "Repeat last run": "Korda viimast jooksu", "Use selected server": "Kasuta valitud serverit",
+    "Live log": "Reaalaja logi",
+    # checkboxes
+    "Distinct request prefixes (spread across backends)":
+        "Eristuvad päringu-prefiksid (jaota backend'ide vahel)",
+    "Integrity probes — token-count honesty, context recall, model quality":
+        "Aususe-proovid — token-loenduse ausus, konteksti tagasikutse, mudeli kvaliteet",
+    # model-fit check labels
+    "Hermes tool-calling (valid <tool_call>, right tool & args, no spurious calls)":
+        "Hermes tööriista-kutsed (valiidne <tool_call>, õige tööriist & argumendid, ei valekutseid)",
+    "Structured JSON output (strict, parseable, correct schema)":
+        "Struktuurne JSON väljund (range, parse'itav, õige skeem)",
+    "Instruction following & format discipline (no leaked reasoning)":
+        "Juhiste järgimine & formaadidistsipliin (mõtlemine ei leki)",
+    "Latency & throughput on these prompts": "Latents & läbilaskevõime nendel promptidel",
+    "Overload probe (+25%) — check clean admission control":
+        "Ülekoormuse proovik (+25%) — kontrolli puhast admission control'i",
+    "Set the load and press ‘Run soak test’.": "Sea koormus ja vajuta ‘Käivita soak-test’.",
+    "Pick the checks and press ‘Run model-fit test’.":
+        "Vali kontrollid ja vajuta ‘Käivita model-fit test’.",
+    "Set the traffic shape and press ‘Run provider-fit test’.":
+        "Sea liikluse kuju ja vajuta ‘Käivita provider-fit test’.",
+}
+
+
+def _help_text(lang: str) -> str:
+    """The Help window body — usage guide + infrastructure & support contacts."""
+    if lang == "et":
+        return (
+            "LLM Scanner — juhend\n"
+            "════════════════════\n\n"
+            "Tööriist lokaalsete LLM-serverite (vLLM, SGLang, Ollama, llama.cpp, TGI, LM Studio) "
+            "avastamiseks, benchmarkimiseks ja häälestamiseks.\n\n"
+            "Vahekaardid\n"
+            "───────────\n"
+            "• Connection — sisesta host/port, ‘Detect server’ tuvastab serveri ja mudelid.\n"
+            "• Benchmark — kiirus, latents, läbilaskevõime, kontekst, sanity, sweep, determinism, limits.\n"
+            "• Optimum finder — leiab automaatselt parima paralleelsuse ja suurima päringusuuruse.\n"
+            "• Soak — hoiab püsivat koormust ja mõõdab tokeneid tunnis (+ TheEye päris-koormus).\n"
+            "• Model fit — kas mudel sobib agentseks kasutuseks (Hermes tööriistad, JSON, juhised).\n"
+            "• Provider fit — kas backend kannatab OpenRouter/HuggingFace liiklust; API-leping, aususe-\n"
+            "  testid (token-loendus, kontekst, kvaliteet), pudelikaela-analüüs, verdikt.\n"
+            "• Network scan — skanni alamvõrku LLM-serverite leidmiseks.\n"
+            "• History — kõik tulemused salvestuvad ~/.llmscanner ja on jooksude-vahel võrreldavad.\n\n"
+            "Näpunäited\n"
+            "──────────\n"
+            "• Iga välja kõrval ⓘ ikoon avab selgituse.\n"
+            "• Teema (hele/tume) ja keele valik on üleval paremal; valik jäetakse meelde.\n"
+            "• Tõsta Timeout suurte väljundite jaoks.\n\n"
+            "Infrastruktuur\n"
+            "──────────────\n"
+            "Visioline Infra — majutus ja infrastruktuur.\n\n"
+            "Tugi ja kontakt\n"
+            "───────────────\n"
+            f"E-post: {SUPPORT_EMAIL}\n"
+            "Küsimuste, vigade ja soovide korral kirjuta tugimeeskonnale.\n"
+        )
+    return (
+        "LLM Scanner — user guide\n"
+        "════════════════════════\n\n"
+        "A tool to discover, benchmark and tune local LLM servers (vLLM, SGLang, Ollama, "
+        "llama.cpp, TGI, LM Studio).\n\n"
+        "Tabs\n"
+        "────\n"
+        "• Connection — enter host/port; ‘Detect server’ fingerprints the server and lists models.\n"
+        "• Benchmark — speed, latency, throughput, context, sanity, sweep, determinism, limits.\n"
+        "• Optimum finder — auto-finds the best concurrency and largest working request size.\n"
+        "• Soak — holds sustained load and measures tokens/hour (+ TheEye real workload).\n"
+        "• Model fit — whether a model suits agentic use (Hermes tools, JSON, instructions).\n"
+        "• Provider fit — whether a backend can serve OpenRouter/HuggingFace traffic: API contract,\n"
+        "  integrity probes (token counting, context, quality), bottleneck analysis, verdict.\n"
+        "• Network scan — scan a subnet to discover LLM servers.\n"
+        "• History — every result is saved to ~/.llmscanner and compared run-over-run.\n\n"
+        "Tips\n"
+        "────\n"
+        "• The ⓘ icon next to each field opens an explanation.\n"
+        "• Theme (light/dark) and language are top-right; your choice is remembered.\n"
+        "• Raise the Timeout for large output sizes.\n\n"
+        "Infrastructure\n"
+        "──────────────\n"
+        "Visioline Infra — hosting and infrastructure.\n\n"
+        "Support & contact\n"
+        "─────────────────\n"
+        f"Email: {SUPPORT_EMAIL}\n"
+        "For questions, bug reports and feature requests, contact the support team.\n"
+    )
+
 # Per-setting help text shown when the ⓘ icon next to a field is clicked.
 INFO = {
     # ---- Connection ----
@@ -471,6 +625,18 @@ class LiveLog(ctk.CTkFrame):
         self.text.tag_configure("dim", foreground=pal["live_dim"])
         self.clear()
 
+    def retheme(self, pal):
+        """Re-apply colours after a light/dark switch (keeps the logged text)."""
+        self.pal = pal
+        bold = ("TkFixedFont", 11, "bold")
+        self.text.configure(bg=pal["live_bg"], fg=pal["txt"])
+        self.text.tag_configure("ts", foreground=pal["live_ts"])
+        self.text.tag_configure("head", foreground=pal["live_head"], font=bold)
+        self.text.tag_configure("ok", foreground=pal["live_ok"], font=bold)
+        self.text.tag_configure("err", foreground=pal["live_err"], font=bold)
+        self.text.tag_configure("metric", foreground=pal["txt"])
+        self.text.tag_configure("dim", foreground=pal["live_dim"])
+
     def clear(self):
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
@@ -504,6 +670,9 @@ class App:
 
     def __init__(self, root: ctk.CTk):
         self.root = root
+        self._lang = store.get_setting("language", "en")
+        if self._lang not in LANG:
+            self._lang = "en"
         self.pal = _palette()
         self.root.title(APP_TITLE)
         self.root.geometry("1400x1010")
@@ -570,7 +739,7 @@ class App:
     def _section(self, parent, title):
         """A titled card frame; returns (outer, body) — pack `outer`, fill `body`."""
         outer = ctk.CTkFrame(parent)
-        ctk.CTkLabel(outer, text=title, anchor="w",
+        ctk.CTkLabel(outer, text=self.L(title), anchor="w",
                      font=ctk.CTkFont(weight="bold")).pack(fill="x", padx=12, pady=(8, 0))
         body = ctk.CTkFrame(outer, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=10, pady=(4, 10))
@@ -587,7 +756,7 @@ class App:
     def _lbl(self, parent, text, info, *, title=None):
         """A [label + ⓘ] frame to grid/pack where a plain field label would go."""
         fr = ctk.CTkFrame(parent, fg_color="transparent")
-        ctk.CTkLabel(fr, text=text).pack(side="left")
+        ctk.CTkLabel(fr, text=self.L(text)).pack(side="left")
         self._info_icon(fr, title or text.rstrip(":"), info).pack(side="left", padx=(3, 0))
         return fr
 
@@ -647,18 +816,156 @@ class App:
         tree.bind("<ButtonPress-1>", on_press, add="+")
         tree.bind("<ButtonRelease-1>", on_release, add="+")
 
+    # ------------------------------------------------------- settings / i18n
+    def t(self, key: str) -> str:
+        """Translate a chrome string into the selected language (falls back to EN)."""
+        return LANG.get(self._lang, LANG["en"]).get(key) or LANG["en"].get(key, key)
+
+    def L(self, s: str) -> str:
+        """Translate a tab-UI literal (English is the key; untranslated → English)."""
+        return TR_ET.get(s, s) if self._lang == "et" else s
+
+    def _build_settings_bar(self):
+        """Top-right bar: Help, theme (light/dark/system) and language switch."""
+        bar = ctk.CTkFrame(self.root, fg_color="transparent")
+        bar.pack(fill="x", padx=10, pady=(6, 0))
+        ctk.CTkLabel(bar, text=APP_TITLE,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+
+        self._btn_help = ctk.CTkButton(bar, text=self.t("help"), width=90,
+                                       command=self._show_help)
+        self._btn_help.pack(side="right", padx=(8, 0))
+
+        # Language (English primary, Estonian optional).
+        self._lang_menu = ctk.CTkOptionMenu(
+            bar, width=110, values=["English", "Eesti"],
+            command=self._on_language)
+        self._lang_menu.set("Eesti" if self._lang == "et" else "English")
+        self._lang_menu.pack(side="right", padx=(8, 0))
+        self._lbl_language = ctk.CTkLabel(bar, text=self.t("language"))
+        self._lbl_language.pack(side="right", padx=(12, 4))
+
+        # Theme (System / Light / Dark).
+        cur = store.get_setting("appearance", "System")
+        self._theme_seg = ctk.CTkSegmentedButton(
+            bar, values=["System", "Light", "Dark"], command=self._on_theme)
+        self._theme_seg.set(cur if cur in ("System", "Light", "Dark") else "System")
+        self._theme_seg.pack(side="right")
+        self._lbl_theme = ctk.CTkLabel(bar, text=self.t("theme"))
+        self._lbl_theme.pack(side="right", padx=(12, 4))
+
+    def _on_theme(self, mode: str):
+        ctk.set_appearance_mode(mode)
+        store.set_setting("appearance", mode)
+        self._retheme()
+
+    def _retheme(self):
+        """Re-apply palette-dependent colours after a light/dark switch — CTk
+        widgets update themselves; the custom tk canvas/text/tree do not."""
+        self.pal = _palette()
+        self._style_trees()
+        for name in ("bench_log", "opt_log", "soak_log", "fit_log", "ready_log"):
+            log = getattr(self, name, None)
+            if log is not None:
+                log.retheme(self.pal)
+        for name in ("bench_chart", "opt_chart", "soak_chart", "ready_chart"):
+            ch = getattr(self, name, None)
+            if ch is not None:
+                try:
+                    ch._redraw()
+                except Exception:
+                    pass
+
+    def _on_language(self, choice: str):
+        self._lang = "et" if choice == "Eesti" else "en"
+        store.set_setting("language", self._lang)
+        self._apply_language()
+
+    def _apply_language(self):
+        """Relabel the chrome and rebuild the tabs in the selected language."""
+        self._btn_help.configure(text=self.t("help"))
+        self._lbl_language.configure(text=self.t("language"))
+        self._lbl_theme.configure(text=self.t("theme"))
+        win = getattr(self, "_help_win", None)
+        if win is not None and win.winfo_exists():
+            self._render_help(win)
+        if self._busy:
+            # Can't safely rebuild mid-run; the chrome switches now, tabs on the
+            # next switch or restart.
+            self._set_status("Language applies to tabs when the current run finishes.")
+            return
+        self._rebuild_tabs()
+        self.status.configure(text=self.t("ready"))
+
+    def _show_help(self):
+        win = getattr(self, "_help_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            win.focus_force()
+            return
+        win = ctk.CTkToplevel(self.root)
+        win.title(self.t("help_title"))
+        win.geometry("720x620")
+        win.transient(self.root)
+        self._help_win = win
+        self._render_help(win)
+
+    def _render_help(self, win):
+        for w in win.winfo_children():
+            w.destroy()
+        win.title(self.t("help_title"))
+        box = ctk.CTkTextbox(win, wrap="word", font=("TkDefaultFont", 13))
+        box.pack(fill="both", expand=True, padx=12, pady=(12, 6))
+        box.insert("1.0", _help_text(self._lang))
+        box.configure(state="disabled")
+        footer = ctk.CTkFrame(win, fg_color="transparent")
+        footer.pack(fill="x", padx=12, pady=(0, 12))
+        ctk.CTkButton(footer, text=SUPPORT_EMAIL, width=200,
+                      command=lambda: self._copy_to_clipboard(SUPPORT_EMAIL)).pack(side="left")
+        ctk.CTkButton(footer, text=self.t("close"), width=90,
+                      command=win.destroy).pack(side="right")
+
+    def _copy_to_clipboard(self, text: str):
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self._set_status(f"Copied: {text}")
+        except Exception:
+            pass
+
     # ----------------------------------------------------------------- UI build
     def _build_ui(self):
+        self._build_settings_bar()
+        self._build_tabs()
+
+        bar = ctk.CTkFrame(self.root, fg_color="transparent")
+        bar.pack(fill="x", padx=10, pady=(0, 8))
+        self._status_bar = bar
+        self.progress = ctk.CTkProgressBar(bar, mode="indeterminate", width=180)
+        self.progress.set(0)
+        self.progress.pack(side="right", padx=6)
+        self.status = ctk.CTkLabel(bar, text=self.t("ready"), anchor="w")
+        self.status.pack(side="left", fill="x", expand=True)
+
+    def _build_tabs(self):
+        """Create the tabview and all tabs. Split out so a language switch can
+        rebuild it (tab names are set at creation and can't be renamed live)."""
+        self._cancel_btns = []
         self.tabview = ctk.CTkTabview(self.root)
-        self.tabview.pack(fill="both", expand=True, padx=8, pady=(8, 4))
-        self.tab_conn = self.tabview.add("Connection")
-        self.tab_bench = self.tabview.add("Benchmark")
-        self.tab_opt = self.tabview.add("Optimum finder")
-        self.tab_soak = self.tabview.add("Soak")
-        self.tab_fit = self.tabview.add("Model fit")
-        self.tab_ready = self.tabview.add("Provider fit")
-        self.tab_scan = self.tabview.add("Network scan")
-        self.tab_history = self.tabview.add("History")
+        if getattr(self, "_status_bar", None) is not None:
+            # Keep the tabview above the status bar when rebuilt.
+            self.tabview.pack(fill="both", expand=True, padx=8, pady=(8, 4),
+                              before=self._status_bar)
+        else:
+            self.tabview.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        self.tab_conn = self.tabview.add(self.L("Connection"))
+        self.tab_bench = self.tabview.add(self.L("Benchmark"))
+        self.tab_opt = self.tabview.add(self.L("Optimum finder"))
+        self.tab_soak = self.tabview.add(self.L("Soak"))
+        self.tab_fit = self.tabview.add(self.L("Model fit"))
+        self.tab_ready = self.tabview.add(self.L("Provider fit"))
+        self.tab_scan = self.tabview.add(self.L("Network scan"))
+        self.tab_history = self.tabview.add(self.L("History"))
 
         self._build_conn_tab()
         self._build_bench_tab()
@@ -668,14 +975,17 @@ class App:
         self._build_readiness_tab()
         self._build_scan_tab()
         self._build_history_tab()
+        self._style_trees()
 
-        bar = ctk.CTkFrame(self.root, fg_color="transparent")
-        bar.pack(fill="x", padx=10, pady=(0, 8))
-        self.progress = ctk.CTkProgressBar(bar, mode="indeterminate", width=180)
-        self.progress.set(0)
-        self.progress.pack(side="right", padx=6)
-        self.status = ctk.CTkLabel(bar, text="Ready.", anchor="w")
-        self.status.pack(side="left", fill="x", expand=True)
+    def _rebuild_tabs(self):
+        """Rebuild the tabview in the current language (blocked while a test runs)."""
+        if self._busy:
+            return
+        try:
+            self.tabview.destroy()
+        except Exception:
+            pass
+        self._build_tabs()
 
     def _conn_fields(self, parent):
         grid = ctk.CTkFrame(parent, fg_color="transparent")
@@ -705,9 +1015,9 @@ class App:
                                              values=["(no saved hosts)"],
                                              command=lambda _v: self.on_load_host())
         self.host_select.grid(row=0, column=0, padx=6, pady=4, sticky="w")
-        ctk.CTkButton(body, text="Load", width=70, command=self.on_load_host).grid(row=0, column=1, padx=4)
-        ctk.CTkButton(body, text="Save current…", width=120, command=self.on_save_host).grid(row=0, column=2, padx=4)
-        ctk.CTkButton(body, text="Delete", width=70, fg_color="#b04a4a", hover_color="#963c3c",
+        ctk.CTkButton(body, text=self.L("Load"), width=70, command=self.on_load_host).grid(row=0, column=1, padx=4)
+        ctk.CTkButton(body, text=self.L("Save current…"), width=120, command=self.on_save_host).grid(row=0, column=2, padx=4)
+        ctk.CTkButton(body, text=self.L("Delete"), width=70, fg_color="#b04a4a", hover_color="#963c3c",
                       command=self.on_delete_host).grid(row=0, column=3, padx=4)
         self._refresh_hosts()
 
@@ -716,9 +1026,9 @@ class App:
 
         btns = ctk.CTkFrame(self.tab_conn, fg_color="transparent")
         btns.pack(fill="x", padx=12)
-        self.btn_detect = ctk.CTkButton(btns, text="Detect server", command=self.on_detect)
+        self.btn_detect = ctk.CTkButton(btns, text=self.L("Detect server"), command=self.on_detect)
         self.btn_detect.pack(side="left")
-        self.btn_models = ctk.CTkButton(btns, text="List models", command=self.on_list_models)
+        self.btn_models = ctk.CTkButton(btns, text=self.L("List models"), command=self.on_list_models)
         self.btn_models.pack(side="left", padx=8)
 
         sec2, body2 = self._section(self.tab_conn, "Server info")
@@ -782,16 +1092,16 @@ class App:
 
         runbar = ctk.CTkFrame(self.tab_bench, fg_color="transparent")
         runbar.pack(fill="x", padx=12, pady=4)
-        self.btn_run = ctk.CTkButton(runbar, text="Run benchmark", command=self.on_run_bench)
+        self.btn_run = ctk.CTkButton(runbar, text=self.L("Run benchmark"), command=self.on_run_bench)
         self.btn_run.pack(side="left")
-        self.btn_repeat = ctk.CTkButton(runbar, text="Repeat last run", state="disabled",
+        self.btn_repeat = ctk.CTkButton(runbar, text=self.L("Repeat last run"), state="disabled",
                                         command=self.on_repeat)
         self.btn_repeat.pack(side="left", padx=8)
-        ctk.CTkButton(runbar, text="Export CSV…", width=100,
+        ctk.CTkButton(runbar, text=self.L("Export CSV…"), width=100,
                       command=self.export_bench).pack(side="left", padx=4)
-        ctk.CTkButton(runbar, text="Copy to clipboard", width=130,
+        ctk.CTkButton(runbar, text=self.L("Copy to clipboard"), width=130,
                       command=self.copy_bench).pack(side="left", padx=4)
-        self.btn_clear = ctk.CTkButton(runbar, text="Clear view", fg_color="gray40",
+        self.btn_clear = ctk.CTkButton(runbar, text=self.L("Clear view"), fg_color="gray40",
                                        hover_color="gray30", command=self._clear_comparison)
         self.btn_clear.pack(side="left", padx=4)
 
@@ -876,16 +1186,16 @@ class App:
 
         runbar = ctk.CTkFrame(self.tab_opt, fg_color="transparent")
         runbar.pack(fill="x", padx=12, pady=4)
-        self.btn_opt = ctk.CTkButton(runbar, text="Find optima", command=self.on_run_optima)
+        self.btn_opt = ctk.CTkButton(runbar, text=self.L("Find optima"), command=self.on_run_optima)
         self.btn_opt.pack(side="left")
-        btn_opt_cancel = ctk.CTkButton(runbar, text="Cancel", width=80, state="disabled",
+        btn_opt_cancel = ctk.CTkButton(runbar, text=self.L("Cancel"), width=80, state="disabled",
                                        fg_color="#b04a4a", hover_color="#963c3c",
                                        command=self.cancel_current)
         btn_opt_cancel.pack(side="left", padx=8)
         self._cancel_btns.append(btn_opt_cancel)
-        ctk.CTkButton(runbar, text="Export CSV…", width=100,
+        ctk.CTkButton(runbar, text=self.L("Export CSV…"), width=100,
                       command=self.export_optima).pack(side="left", padx=8)
-        ctk.CTkButton(runbar, text="Copy to clipboard", width=130,
+        ctk.CTkButton(runbar, text=self.L("Copy to clipboard"), width=130,
                       command=self.copy_optima).pack(side="left", padx=4)
         ctk.CTkButton(runbar, text="Clear", width=80, fg_color="gray40", hover_color="gray30",
                       command=self._clear_opt).pack(side="left", padx=4)
@@ -1243,7 +1553,7 @@ class App:
         field(1, 2, "Output tokens / req", self.var_soak_out, INFO["soak_out"])
         fr = ctk.CTkFrame(top, fg_color="transparent")
         fr.grid(row=2, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
-        ctk.CTkCheckBox(fr, text="Distinct request prefixes (spread across backends)",
+        ctk.CTkCheckBox(fr, text=self.L("Distinct request prefixes (spread across backends)"),
                         variable=self.var_soak_distinct).pack(side="left")
         self._info_icon(fr, "Distinct request prefixes", INFO["soak_distinct"]).pack(side="left", padx=(5, 0))
         fr2 = ctk.CTkFrame(top, fg_color="transparent")
@@ -1261,9 +1571,9 @@ class App:
 
         runbar = ctk.CTkFrame(self.tab_soak, fg_color="transparent")
         runbar.pack(fill="x", padx=12, pady=4)
-        self.btn_soak = ctk.CTkButton(runbar, text="Run soak test", command=self.on_run_soak)
+        self.btn_soak = ctk.CTkButton(runbar, text=self.L("Run soak test"), command=self.on_run_soak)
         self.btn_soak.pack(side="left")
-        btn_soak_cancel = ctk.CTkButton(runbar, text="Stop", width=80, state="disabled",
+        btn_soak_cancel = ctk.CTkButton(runbar, text=self.L("Stop"), width=80, state="disabled",
                                         fg_color="#b04a4a", hover_color="#963c3c",
                                         command=self.cancel_current)
         btn_soak_cancel.pack(side="left", padx=8)
@@ -1274,7 +1584,7 @@ class App:
 
         # Big live readout
         self.soak_readout = ctk.CTkLabel(
-            self.tab_soak, text="Set the load and press ‘Run soak test’.",
+            self.tab_soak, text=self.L("Set the load and press ‘Run soak test’."),
             anchor="w", justify="left", font=ctk.CTkFont(size=15, weight="bold"))
         self.soak_readout.pack(fill="x", padx=16, pady=(2, 4))
 
@@ -1448,7 +1758,7 @@ class App:
         def check(r, label, var, info):
             fr = ctk.CTkFrame(top, fg_color="transparent")
             fr.grid(row=r, column=0, columnspan=4, sticky="w", padx=12, pady=2)
-            ctk.CTkCheckBox(fr, text=label, variable=var).pack(side="left")
+            ctk.CTkCheckBox(fr, text=self.L(label), variable=var).pack(side="left")
             self._info_icon(fr, label, info).pack(side="left", padx=(5, 0))
 
         check(1, "Hermes tool-calling (valid <tool_call>, right tool & args, no spurious calls)",
@@ -1462,9 +1772,9 @@ class App:
 
         runbar = ctk.CTkFrame(self.tab_fit, fg_color="transparent")
         runbar.pack(fill="x", padx=12, pady=4)
-        self.btn_fit = ctk.CTkButton(runbar, text="Run model-fit test", command=self.on_run_modelfit)
+        self.btn_fit = ctk.CTkButton(runbar, text=self.L("Run model-fit test"), command=self.on_run_modelfit)
         self.btn_fit.pack(side="left")
-        btn_fit_cancel = ctk.CTkButton(runbar, text="Stop", width=80, state="disabled",
+        btn_fit_cancel = ctk.CTkButton(runbar, text=self.L("Stop"), width=80, state="disabled",
                                        fg_color="#b04a4a", hover_color="#963c3c",
                                        command=self.cancel_current)
         btn_fit_cancel.pack(side="left", padx=8)
@@ -1473,7 +1783,7 @@ class App:
                      text_color=self.pal["sub"]).pack(side="left", padx=10)
 
         self.fit_readout = ctk.CTkLabel(
-            self.tab_fit, text="Pick the checks and press ‘Run model-fit test’.",
+            self.tab_fit, text=self.L("Pick the checks and press ‘Run model-fit test’."),
             anchor="w", justify="left", font=ctk.CTkFont(size=15, weight="bold"))
         self.fit_readout.pack(fill="x", padx=16, pady=(2, 4))
 
@@ -1624,26 +1934,26 @@ class App:
         field(3, 2, "Context probe (tok)", self.var_rd_ctx, INFO["rd_ctx"])
         fr0 = ctk.CTkFrame(top, fg_color="transparent")
         fr0.grid(row=4, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
-        ctk.CTkCheckBox(fr0, text="Integrity probes — token-count honesty, context recall, model quality",
+        ctk.CTkCheckBox(fr0, text=self.L("Integrity probes — token-count honesty, context recall, model quality"),
                         variable=self.var_rd_integrity).pack(side="left")
         self._info_icon(fr0, "Integrity probes", INFO["rd_integrity"]).pack(side="left", padx=(5, 0))
         fr = ctk.CTkFrame(top, fg_color="transparent")
         fr.grid(row=5, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
-        ctk.CTkCheckBox(fr, text="Overload probe (+25%) — check clean admission control",
+        ctk.CTkCheckBox(fr, text=self.L("Overload probe (+25%) — check clean admission control"),
                         variable=self.var_rd_overload).pack(side="left")
         self._info_icon(fr, "Overload probe", INFO["rd_overload"]).pack(side="left", padx=(5, 0))
         fr2 = ctk.CTkFrame(top, fg_color="transparent")
         fr2.grid(row=6, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
-        ctk.CTkCheckBox(fr2, text="Distinct request prefixes (spread across backends)",
+        ctk.CTkCheckBox(fr2, text=self.L("Distinct request prefixes (spread across backends)"),
                         variable=self.var_rd_distinct).pack(side="left")
         self._info_icon(fr2, "Distinct request prefixes", INFO["rd_distinct"]).pack(side="left", padx=(5, 0))
 
         runbar = ctk.CTkFrame(self.tab_ready, fg_color="transparent")
         runbar.pack(fill="x", padx=12, pady=4)
-        self.btn_ready = ctk.CTkButton(runbar, text="Run provider-fit test",
+        self.btn_ready = ctk.CTkButton(runbar, text=self.L("Run provider-fit test"),
                                        command=self.on_run_readiness)
         self.btn_ready.pack(side="left")
-        btn_ready_cancel = ctk.CTkButton(runbar, text="Stop", width=80, state="disabled",
+        btn_ready_cancel = ctk.CTkButton(runbar, text=self.L("Stop"), width=80, state="disabled",
                                          fg_color="#b04a4a", hover_color="#963c3c",
                                          command=self.cancel_current)
         btn_ready_cancel.pack(side="left", padx=8)
@@ -1653,7 +1963,7 @@ class App:
                      text_color=self.pal["sub"]).pack(side="left", padx=10)
 
         self.ready_readout = ctk.CTkLabel(
-            self.tab_ready, text="Set the traffic shape and press ‘Run provider-fit test’.",
+            self.tab_ready, text=self.L("Set the traffic shape and press ‘Run provider-fit test’."),
             anchor="w", justify="left", font=ctk.CTkFont(size=15, weight="bold"))
         self.ready_readout.pack(fill="x", padx=16, pady=(2, 4))
 
@@ -1871,9 +2181,9 @@ class App:
 
         btns = ctk.CTkFrame(self.tab_scan, fg_color="transparent")
         btns.pack(fill="x", padx=12)
-        self.btn_scan = ctk.CTkButton(btns, text="Scan network", command=self.on_scan)
+        self.btn_scan = ctk.CTkButton(btns, text=self.L("Scan network"), command=self.on_scan)
         self.btn_scan.pack(side="left")
-        ctk.CTkButton(btns, text="Use selected server", command=self.on_use_server).pack(side="left", padx=8)
+        ctk.CTkButton(btns, text=self.L("Use selected server"), command=self.on_use_server).pack(side="left", padx=8)
         self.scan_progress = ctk.CTkProgressBar(btns, width=260)
         self.scan_progress.set(0)
         self.scan_progress.pack(side="right", padx=6)
@@ -1894,9 +2204,9 @@ class App:
     def _build_history_tab(self):
         bar = ctk.CTkFrame(self.tab_history, fg_color="transparent")
         bar.pack(fill="x", padx=12, pady=8)
-        ctk.CTkButton(bar, text="Refresh", width=80, command=self.refresh_history).pack(side="left")
-        ctk.CTkButton(bar, text="Export CSV…", width=100, command=self.export_history).pack(side="left", padx=6)
-        ctk.CTkButton(bar, text="Clear all", width=80, fg_color="#b04a4a", hover_color="#963c3c",
+        ctk.CTkButton(bar, text=self.L("Refresh"), width=80, command=self.refresh_history).pack(side="left")
+        ctk.CTkButton(bar, text=self.L("Export CSV…"), width=100, command=self.export_history).pack(side="left", padx=6)
+        ctk.CTkButton(bar, text=self.L("Clear all"), width=80, fg_color="#b04a4a", hover_color="#963c3c",
                       command=self.clear_history).pack(side="left")
         self._lbl(bar, "Filter:", INFO["hist_filter"]).pack(side="left", padx=(16, 4))
         self.var_hist_filter = tk.StringVar()
@@ -2768,7 +3078,9 @@ class App:
 
 
 def main():
-    ctk.set_appearance_mode("System")     # follows the OS light/dark setting
+    # Restore the saved theme (System follows the OS light/dark setting).
+    mode = store.get_setting("appearance", "System")
+    ctk.set_appearance_mode(mode if mode in ("System", "Light", "Dark") else "System")
     ctk.set_default_color_theme("blue")
     root = ctk.CTk()
     App(root)

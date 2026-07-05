@@ -69,6 +69,10 @@ def _open() -> sqlite3.Connection:
             host TEXT, port INTEGER, last_used REAL, uses INTEGER,
             PRIMARY KEY (host, port))"""
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY, value TEXT)"""
+    )
     # Migrate databases created before the chart columns existed.
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(results)")}
     if "value" not in cols:
@@ -180,6 +184,30 @@ def record_endpoint(host: str, port) -> None:
                DO UPDATE SET last_used = excluded.last_used, uses = uses + 1""",
             (host, port, time.time()),
         )
+
+
+# ----------------------------------------------------------------- settings
+def get_setting(key: str, default: str = "") -> str:
+    """Read a persisted UI setting (theme, language, …)."""
+    try:
+        with _db() as c:
+            row = c.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else default
+    except Exception:
+        return default
+
+
+def set_setting(key: str, value: str) -> None:
+    """Persist a UI setting."""
+    try:
+        with _db() as c:
+            c.execute(
+                """INSERT INTO settings (key, value) VALUES (?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                (key, str(value)),
+            )
+    except Exception:
+        pass
 
 
 def recent_hosts(limit: int = 50) -> list[str]:

@@ -64,6 +64,12 @@ rasket Qt-installi) ja lisaks boonusena käsurea-liides skriptimiseks.
   **lõikelauale kopeerida** (tab-eraldatud, kleebib otse tabelarvutusse) — koos veerupäistega.
 - ❓ **Info-ikoonid** – iga seadistuse (kõigil tabidel) kõrval on **ⓘ**, millele klikkides avaneb
   selgitus, mida parameeter teeb ja mida erinevad väärtused annavad.
+- ❔ **Abi / Help** – üleval paremal nupp, mis avab juhendi (vahekaartide ülevaade + näpunäited) ning
+  **infrastruktuuri (Visioline Infra) ja toe kontaktid** (`support@itteam.eu`).
+- 🌗 **Teema** – üleval paremal **Süsteem / Hele / Tume** valik; rakendub kohe ja jäetakse meelde.
+- 🌐 **Keel** – **inglise (primary) ja eesti**; valik jäetakse meelde ja rakendub kohe. Tõlgitud on
+  vahekaartide nimed, sektsioonide pealkirjad, väljade sildid, nupud ja checkbox'id; ⓘ-abitekstid ja
+  pikad kirjeldused jäävad inglise keelde (fallback).
 
 ## Paigaldus (macOS)
 
