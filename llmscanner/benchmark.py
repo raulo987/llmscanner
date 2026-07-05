@@ -900,6 +900,33 @@ _TOOL_CASES = [
     {"user": "What does the word 'ephemeral' mean?", "tool": None},
 ]
 
+# Native OpenAI function-calling schemas — the actual `tools` request parameter
+# every router / vLLM / TGI / SGLang implements, as opposed to the Hermes prompt
+# convention. Same four tools as _HERMES_SYSTEM, so the _TOOL_CASES apply to both.
+_NATIVE_TOOLS = [
+    {"type": "function", "function": {"name": "get_weather",
+        "description": "Get the current weather for a city", "parameters": {"type": "object",
+        "properties": {"city": {"type": "string"},
+                       "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}},
+        "required": ["city"]}}},
+    {"type": "function", "function": {"name": "web_search",
+        "description": "Search the web for up-to-date information", "parameters": {"type": "object",
+        "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "calculator",
+        "description": "Evaluate an arithmetic expression", "parameters": {"type": "object",
+        "properties": {"expression": {"type": "string"}}, "required": ["expression"]}}},
+    {"type": "function", "function": {"name": "send_email",
+        "description": "Send an email to a recipient", "parameters": {"type": "object",
+        "properties": {"to": {"type": "string"}, "subject": {"type": "string"},
+                       "body": {"type": "string"}}, "required": ["to", "subject", "body"]}}},
+]
+# Single-tool schema for the Provider-fit native probe.
+_NATIVE_TOOL_SCHEMA = _NATIVE_TOOLS[0]
+# Minimal system prompt for the native-tools test (the schema is in `tools`, so no
+# tool definitions need to go in the prompt — unlike the Hermes convention).
+_TOOL_SYSTEM = ("You are a helpful assistant with access to tools. Call the appropriate "
+                "tool when the user's request needs one; otherwise answer normally.")
+
 _JSON_SYSTEM = ("You output only raw JSON that satisfies the request. No prose, no "
                 "explanation, no markdown, no code fences — just the JSON value.")
 
@@ -1011,23 +1038,32 @@ async def suitability_test(client: LLMClient, model: Optional[str], *,
     lat_samples: list = []       # (total_time, output_tps) across every probe
     cases_out: list = []         # flat per-case log for the results table
 
-    async def ask(system, user, max_tokens):
+    async def ask(system, user, max_tokens, tools=None, tool_choice=None):
         r = await client.generate(model=model, prompt=user, system=system,
-                                  max_tokens=max_tokens, temperature=0.0)
+                                  max_tokens=max_tokens, temperature=0.0,
+                                  tools=tools, tool_choice=tool_choice)
         if r.ok and r.total_time > 0:
             lat_samples.append((r.total_time, r.output_tps))
         return r
 
     report: dict = {"model": model, "dims": list(dims)}
 
-    # ---- Dimension: Hermes tool-calling --------------------------------------
+    # ---- Dimension: tool-calling ---------------------------------------------
+    # Tests the native OpenAI `tools` API (the real standard), with a neutral
+    # system prompt — deliberately NOT the Hermes prompt, which would instruct the
+    # model into a convention it may be bad at (that's exactly what falsely failed
+    # native-capable models before). As a best-effort fallback we still accept a
+    # Hermes <tool_call> if the model emits one in its text on its own; a model is
+    # credited if it calls the tool either way, and only one that does neither
+    # scores zero.
     if "tool" in dims:
         pos = [c for c in _TOOL_CASES if c["tool"]]
         neg = [c for c in _TOOL_CASES if not c["tool"]]
         valid = select = args_ok = false_call = 0
         for c in _TOOL_CASES:
-            r = await ask(_HERMES_SYSTEM, c["user"], 512)
-            calls = _extract_tool_calls(r.text) if r.ok else []
+            r = await ask(_TOOL_SYSTEM, c["user"], 512,
+                          tools=_NATIVE_TOOLS, tool_choice="auto")
+            calls = (r.tool_calls or _extract_tool_calls(r.text)) if r.ok else []
             if c["tool"]:
                 got = calls[0][0] if calls else None
                 got_args = calls[0][1] if calls else {}
@@ -1036,7 +1072,19 @@ async def suitability_test(client: LLMClient, model: Optional[str], *,
                 a = s and _arg_ok(got_args, c["args"])
                 valid += v; select += s; args_ok += a
                 ok = a
-                detail = (f"→ {got or '∅'}" if not a else f"✓ {got} {got_args}")
+                if ok:
+                    detail = f"✓ {got} {got_args}"
+                elif not r.ok:
+                    detail = f"→ request failed: {r.error[:60]}"
+                elif not calls:
+                    # Nothing extractable — show what the model actually said, so a
+                    # failure is self-diagnosing instead of just "→ ∅".
+                    snippet = _raw_snippet(r.text)
+                    detail = f"→ no tool call — model said: {snippet}" if snippet else "→ no tool call — empty response"
+                elif got != c["tool"]:
+                    detail = f"→ wrong tool: {got} (expected {c['tool']})"
+                else:
+                    detail = f"→ {got} — bad args: {got_args}"
             else:
                 fc = bool(calls)
                 false_call += fc
@@ -1158,7 +1206,7 @@ def _suitability_verdict(report: dict) -> tuple:
     # Hard gate: if tool-calling is fundamentally broken, it can't be agentic-fit
     # no matter how clean its prose JSON is.
     if "tool" in report and report["tool"]["valid_rate"] < 0.5:
-        return overall, "❌ EI SOBI — ei suuda usaldusväärselt tööriistu kutsuda (Hermes)"
+        return overall, "❌ EI SOBI — ei suuda usaldusväärselt tööriistu kutsuda"
     if overall >= 0.85:
         return overall, "✅ SOBIB — täidab agentse kasutuse nõuded"
     if overall >= 0.6:
@@ -1209,6 +1257,16 @@ def _visible_answer(r) -> str:
     if m:
         text = text[:m.start()]
     return text.strip()
+
+
+def _raw_snippet(text: str, n: int = 70) -> str:
+    """A collapsed, truncated preview of raw model output for a failed probe's
+    detail line — so a run is self-diagnosing instead of just showing "nothing
+    extracted" with no clue why."""
+    t = " ".join((text or "").split())
+    if not t:
+        return ""
+    return repr(t[:n] + ("…" if len(t) > n else ""))
 
 
 async def _detect_reasoning(client: LLMClient, model: str) -> bool:
@@ -1324,18 +1382,56 @@ async def _readiness_compliance(client: LLMClient, model: str,
         (r.error[:60] if not r.ok else "accepted an invalid model — no validation"),
         "returns a 4xx JSON error, not 5xx / timeout")
 
-    # 11. Tool calling — HuggingFace explicitly runs a tool-calling behavioural
-    #     test on LLMs before listing a provider (register-as-a-provider docs).
+    # 11. Tool calling (Hermes prompt) — a prompt-embedded convention (tool specs
+    #     as text in the system prompt, response wrapped in <tool_call> XML) that
+    #     some fine-tunes (Hermes/NousResearch, agent frameworks like Openclaw)
+    #     rely on. Informational — it does NOT gate the verdicts below, since a
+    #     router's actual API contract is the native `tools` parameter (next check).
     tool_pos = [c for c in _TOOL_CASES if c["tool"]][:3]
     thits = 0
+    sample = ""
     for c in tool_pos:
         r = await one(c["user"], budget(256), temperature=0.0, system=_HERMES_SYSTEM)
         calls = _extract_tool_calls(_visible_answer(r)) if r.ok else []
         if calls and calls[0][0] == c["tool"]:
             thits += 1
+        elif not sample:
+            # Nothing extractable — capture what the model actually said, so a
+            # failure is self-diagnosing instead of a bare "0/3 correct".
+            sample = _raw_snippet(_visible_answer(r)) if r.ok else repr(r.error[:60])
     tool_ok = thits >= max(1, len(tool_pos) - 1)   # allow one miss
-    add("Tool calling", tool_ok, f"{thits}/{len(tool_pos)} correct Hermes tool calls",
-        "HF runs a tool-calling test on LLMs")
+    detail = f"{thits}/{len(tool_pos)} correct Hermes tool calls"
+    if not tool_ok and sample:
+        detail += f" — e.g. model said: {sample}"
+    add("Tool calling (Hermes prompt)", tool_ok, detail,
+        "prompt-embedded tool-calling convention (Hermes/NousResearch XML)")
+
+    # 11b. Tool calling (native API) — the standard OpenAI `tools` request
+    #      parameter (structured schema in, `tool_calls` in the response), which is
+    #      what OpenRouter / vLLM / TGI / SGLang actually implement — the real API
+    #      contract a provider must satisfy. Gates the verdicts. The legacy
+    #      /v1/completions endpoint has no tools API, so it's n/a there.
+    if client.endpoint == "completions":
+        add("Tool calling (native API)", True,
+            "n/a — /v1/completions has no tools API (use the chat endpoint)",
+            "supports the standard OpenAI `tools` request parameter")
+    else:
+        r = await client.generate(
+            model=model, prompt="What's the weather in Tallinn right now? Use celsius.",
+            max_tokens=budget(128), temperature=0.0,
+            tools=[_NATIVE_TOOL_SCHEMA], tool_choice="auto")
+        native_ok = bool(r.ok and r.tool_calls and r.tool_calls[0][0] == "get_weather")
+        if native_ok:
+            ndetail = f"✓ {r.tool_calls[0][0]}({r.tool_calls[0][1]})"
+        elif not r.ok:
+            ndetail = f"request failed: {r.error[:60]}"
+        elif r.tool_calls:
+            ndetail = f"called wrong tool: {r.tool_calls[0][0]}"
+        else:
+            snippet = _raw_snippet(_visible_answer(r))
+            ndetail = f"no tool_calls — model said: {snippet}" if snippet else "no tool_calls, empty response"
+        add("Tool calling (native API)", native_ok, ndetail,
+            "supports the standard OpenAI `tools` request parameter")
 
     # 12. Structured output — HuggingFace also runs a structured-output test.
     json_cases = _JSON_CASES[:2]
@@ -1373,7 +1469,8 @@ async def _readiness_compliance(client: LLMClient, model: str,
     #     not for a live provider, so this is a non-critical gate.
     bad = LLMClient(client.host, client.port, api_key="llmscanner-invalid-key-9z9z9z",
                     scheme=client.scheme, base_path=client.base_path,
-                    endpoint=client.endpoint, timeout=min(client.timeout, 20.0))
+                    endpoint=client.endpoint, timeout=min(client.timeout, 20.0),
+                    extra_body=client.extra_body)
     ra = await bad.generate(model=model, prompt="hi", max_tokens=4)
     enforced = (not ra.ok) and any(ra.error.startswith(f"HTTP {c}") for c in ("401", "403"))
     if enforced:
@@ -1661,6 +1758,7 @@ def _readiness_verdicts(report: dict) -> dict:
         "Clean errors": has("Clean error on bad request"),
         "Auth enforced": has("Auth enforced"),
         "/v1/models metadata": has("/v1/models metadata"),
+        "Tool calling (native API)": has("Tool calling (native API)"),
         "Context honesty": ctx_honest,
         "Model quality": quality_ok,
         "Stable under load": stable,
@@ -1681,7 +1779,7 @@ def _readiness_verdicts(report: dict) -> dict:
         "Concurrent requests": has("Concurrent requests"),
         "/v1/models metadata": has("/v1/models metadata"),
         "TTFT < 5s (HF)": a["ttft_p95_base"] <= 5.0,
-        "Tool calling": has("Tool calling"),
+        "Tool calling (native API)": has("Tool calling (native API)"),
         "Structured output": has("Structured output"),
         "Context honesty": ctx_honest,
         "Model quality": quality_ok,

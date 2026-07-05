@@ -78,6 +78,8 @@ rasket Qt-installi) ja lisaks boonusena käsurea-liides skriptimiseks.
   (metaandmed + mõõdikute tabel; mitu valikut → võrdlustabel).
 - 🔔 **Valmimise-teavitused ja kiirklahvid** – macOS notification + heli, kui pikk test lõpeb;
   Cmd+R (käivita aktiivse tabi test), Cmd+. / Esc (peata), Cmd+D (detect), Cmd+L (mudelid).
+- 🖥️ **Aken sobitub ekraaniga** – akna (ja Abi-/Võrdlus-akende) suurus arvutatakse ekraani mõõtude
+  järgi ja tsentreeritakse, nii et rakendus ei ava end suuremana kui väiksem kuvar.
 
 ## Paigaldus (macOS)
 
@@ -342,20 +344,21 @@ Tagasilükkamised (429/503) eristatakse "kõvadest" vigadest (timeout, connectio
 > töökoormuse kujust (sisend/väljund suhe): RAG-koormus annab palju tokenit **sisse**, chat/agentic
 > rohkem **välja**.
 
-## Model fit (Openclaw / Hermes)
+## Model fit (agentne sobivus)
 
 Eraldi **Model fit** tab ei mõõda kiirust vaid **võimekust**: kas mudel sobib agentseks
-kasutuseks (Openclaw / Hermes tööriista-kutsumine). Jooksutab paarikümne lühikese proovi
-patarei (determistlik, temperature 0) ja annab verdikti **SOBIB / PIIRIPEAL / EI SOBI**.
+kasutuseks. Jooksutab paarikümne lühikese proovi patarei (determistlik, temperature 0) ja annab
+verdikti **SOBIB / PIIRIPEAL / EI SOBI**. Märkeruut **"Lülita thinking testi ajaks välja"**
+(vaikimisi sees) testib Qwen3-stiilis reasoning-mudelit agentses režiimis.
 
 Testitavad dimensioonid (igaüks lülitatav, annab 0–100% skoori):
 
-1. **Hermes tööriista-kutsed** — mudelile antakse Hermes-formaadis süsteemiprompt `<tools>`
-   definitsioonidega (get_weather, web_search, calculator, send_email) ja ta peab vastama
-   valiidse `<tool_call>{"name":…,"arguments":…}</tool_call>` plokiga. Hinnatakse: kas
-   väljastab parse'itava tööriista-JSON-i, valib **õige tööriista**, täidab **õiged
-   argumendid**, ja — oluline — **ei kutsu tööriista** kui küsimus vajab tavalist vastust
-   (valekutsete määr peaks olema 0%). See on põhiline agentne võimekus.
+1. **Tööriista-kutsed** — mudelile antakse tööriistad **natiivse OpenAI `tools` API** kaudu
+   (get_weather, web_search, calculator, send_email — see, mida routerid/vLLM/TGI/SGLang tegelikult
+   kasutavad); mudel, kes tunneb ainult prompt-konventsiooni, saab krediiti ka siis kui emiteerib
+   tekstis Hermes-`<tool_call>` ploki. Hinnatakse: kas kutsub tööriista, valib **õige tööriista**,
+   täidab **õiged argumendid**, ja — oluline — **ei kutsu tööriista** kui küsimus vajab tavalist
+   vastust (valekutsete määr peaks olema 0%). See on põhiline agentne võimekus.
 2. **Struktuurne JSON väljund** — mudelilt küsitakse kindlat JSON-kuju ilma proosa/koodiaedadeta;
    hinnatakse kas vastus parse'ub ja vastab nõutud võtmetele/tüüpidele (mis muidu lõhub
    `json.loads()`-pipeline'i).
@@ -392,7 +395,14 @@ Kiired üksik-proovid, igaüks vastab ühele kõvale nõudele, mille router serv
   400 ei lähe uptime'i vastu, 500+ läheb).
 - **Auth-jõustamine** — tahtlikult vale API-võtmega päring saab 401/403. Avatud otspunkt (vale võti
   aktsepteeritud) on lokaalses arenduses OK, aga mitte live-provideri jaoks → mitte-kriitiline värav.
-- **Tool calling** — Hermes-stiilis tööriista-kutsed. **HF valideerimine testib LLM-idel tool-calling'ut.**
+- **Tool calling (native API)** — päris OpenAI `tools`/`tool_choice` API-parameeter (mida OpenRouter/
+  vLLM/TGI/SGLang tegelikult kasutavad); loeb vastuse `tool_calls` (streaming + non-stream). **Gate'ib
+  nii OpenRouteri kui HuggingFace'i verdikti.** (`/v1/completions` otspunktil n/a — legacy API-l pole
+  tools'i.)
+- **Tool calling (Hermes prompt)** — eraldi, informatiivne kontroll: kas mudel vastab ka prompt-
+  põhisele Hermes/NousResearch `<tool_call>` XML-konventsioonile (Openclaw/agent-raamistikud, mis
+  seda kasutavad). **Ei mõjuta verdikti** — üks kindel fine-tune'i tava, mitte API-lepingu nõue.
+  Kui proov ebaõnnestub, näidatakse mudeli tegelikku vastust (mitte ainult "ebaõnnestus").
 - **Structured output** — nõutud JSON-kuju parse'ub + vastab skeemile. **HF testib structured-output'i.**
 - **/v1/models metadata** — `context_length` (+ pricing) on avaldatud. Mõlemad routerid loevad neid
   `/v1/models`-ist (OpenRouteri model-spec; HF `:fastest`/`:cheapest` valik).
@@ -456,7 +466,16 @@ load, rather than queueing requests"*.
   lävi, single-call streaming), **tool-calling + structured-output** (HF valideerib mõlemat),
   **konteksti-ausus + mudeli kvaliteet**, ja läbilaskevõime — **batching peab skaleeruma (≥1.5×)**.
 
-Tulemus salvestub History-sse (tipp-tok/s), nii et näed jooksude-vahelist muutust.
+Tulemus salvestub History-sse (tipp-tok/s), nii et näed jooksude-vahelist muutust. Nuppudega
+**"Copy sweep table"** ja **"Copy report"** saab lõikelauale kopeerida vastavalt paralleelsuse
+sweep-tabeli (tab-eraldatud) või kogu testi transkriptsiooni (compliance + integrity + verdiktid) —
+mugav tulemuse jagamiseks.
+
+> **🧠 "Lülita thinking testi ajaks välja" (vaikimisi sees):** saadab iga päringuga
+> `chat_template_kwargs.enable_thinking=false`, testides Qwen3-stiilis reasoning-mudelit tema agentses
+> režiimis. Thinking-režiimis kipub selline mudel "ülemõtlema" ja vastama proosas, kutsumata tööriista
+> — nii kukuksid tool-proovid, kuigi mudel on võimekas. Võta ruut maha, et testida thinking-varianti
+> nii-nagu-on. Serverid, mis parameetrit ei toeta, ignoreerivad seda.
 
 > **Märkus allika kohta:** compliance-kontrollid on vastavuses OpenRouteri
 > ([provider integration](https://openrouter.ai/docs/guides/community/for-providers)) ja HF

@@ -44,3 +44,4 @@ class RequestResult:
     stream_chunks: int = 0          # content-or-reasoning-bearing SSE chunks — independent token count
     logprob_avg: Optional[float] = None  # mean logprob of generated tokens (None if unavailable)
     reasoning: str = ""             # reasoning_content / <think> text (reasoning models)
+    tool_calls: list = field(default_factory=list)  # (name, arguments) from the native `tools` API

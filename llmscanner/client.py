@@ -11,6 +11,33 @@ from .models import RequestResult
 from .util import Target, approx_tokens
 
 
+def _accumulate_tool_calls(raw_calls, acc: dict) -> None:
+    """Merge one message's or one delta's `tool_calls` entries into `acc` (keyed by
+    index — streaming splits a single call's `arguments` across many chunks)."""
+    for i, tc in enumerate(raw_calls or []):
+        idx = tc.get("index", i)
+        slot = acc.setdefault(idx, {"name": "", "args": ""})
+        fn = tc.get("function") or {}
+        if fn.get("name"):
+            slot["name"] += fn["name"]
+        if fn.get("arguments"):
+            slot["args"] += fn["arguments"]
+
+
+def _finalize_tool_calls(acc: dict) -> list:
+    """acc (index -> {name, args-as-json-text}) → [(name, parsed-or-raw-args), …]."""
+    out = []
+    for slot in acc.values():
+        if not slot["name"]:
+            continue
+        try:
+            args = json.loads(slot["args"]) if slot["args"] else {}
+        except Exception:
+            args = slot["args"]
+        out.append((slot["name"], args))
+    return out
+
+
 def _collect_logprobs(lp, out: list) -> None:
     """Pull per-token logprobs out of a chunk's `logprobs` object, in both the
     chat form ({"content": [{"logprob": ...}]}) and the completions form
@@ -35,7 +62,7 @@ class LLMClient:
 
     def __init__(self, host: str, port: int, *, api_key: str = "EMPTY",
                  scheme: str = "http", timeout: float = 120.0, endpoint: str = "chat",
-                 base_path: str = ""):
+                 base_path: str = "", extra_body: Optional[dict] = None):
         self.host = host
         self.port = port
         self.scheme = scheme
@@ -44,6 +71,10 @@ class LLMClient:
         self.api_key = api_key or "EMPTY"
         self.timeout = timeout
         self.endpoint = endpoint  # "chat" or "completions"
+        # Extra top-level request-body fields merged into every request — e.g.
+        # {"chat_template_kwargs": {"enable_thinking": False}} to test a Qwen3-style
+        # model in its non-thinking (agentic) mode. Servers ignore unknown fields.
+        self.extra_body = dict(extra_body) if extra_body else {}
 
     @classmethod
     def from_target(cls, target: Target, **kwargs) -> "LLMClient":
@@ -102,7 +133,8 @@ class LLMClient:
         return None
 
     def _payload(self, model, prompt, max_tokens, temperature, system, include_usage,
-                 force_output=False, stop=None, top_p=None, seed=None, logprobs=False):
+                 force_output=False, stop=None, top_p=None, seed=None, logprobs=False,
+                 tools=None, tool_choice=None):
         if self.endpoint == "completions":
             url = f"{self.base_url}/v1/completions"
             payload = {
@@ -153,18 +185,31 @@ class LLMClient:
         if include_usage:
             # vLLM/SGLang return accurate token counts in the final SSE chunk.
             payload["stream_options"] = {"include_usage": True}
+        if tools and self.endpoint != "completions":
+            # Native OpenAI function-calling — the API surface a router actually
+            # sends (as opposed to a prompt-embedded convention like Hermes' XML).
+            payload["tools"] = tools
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
+        # Instance-level extra body last, so a per-run setting (e.g. disable
+        # thinking) applies to every request without threading a param everywhere.
+        for k, v in self.extra_body.items():
+            payload[k] = v
         return url, payload
 
     async def generate(self, *, model: str, prompt: str, max_tokens: int = 128,
                        temperature: float = 0.0, system: Optional[str] = None,
                        force_output: bool = False, stop=None, top_p: Optional[float] = None,
-                       seed: Optional[int] = None, logprobs: bool = False) -> RequestResult:
+                       seed: Optional[int] = None, logprobs: bool = False,
+                       tools=None, tool_choice=None) -> RequestResult:
         """Stream one completion and return timing/throughput metrics.
 
         `force_output` requests exactly `max_tokens` of output (ignore_eos /
         min_tokens) so throughput is measured on a fixed decode length.
         `stop` / `top_p` / `seed` are passed straight through when set (used by
-        the provider-readiness contract checks).
+        the provider-readiness contract checks). `tools` (OpenAI function-calling
+        schema list) / `tool_choice` are forwarded as-is; any tool calls the model
+        makes come back in `RequestResult.tool_calls`.
         """
         # Attempts in order; on a retriable 400/422 we drop the fields most likely
         # to be unsupported — first stream_options, then ignore_eos/min_tokens.
@@ -178,6 +223,7 @@ class LLMClient:
                     temperature=temperature, system=system,
                     include_usage=iu, force_output=fo,
                     stop=stop, top_p=top_p, seed=seed, logprobs=logprobs,
+                    tools=tools, tool_choice=tool_choice,
                 )
             except httpx.HTTPStatusError as e:
                 code = e.response.status_code
@@ -233,10 +279,12 @@ class LLMClient:
 
     async def _stream_once(self, *, model, prompt, max_tokens, temperature,
                            system, include_usage, force_output=False,
-                           stop=None, top_p=None, seed=None, logprobs=False) -> RequestResult:
+                           stop=None, top_p=None, seed=None, logprobs=False,
+                           tools=None, tool_choice=None) -> RequestResult:
         url, payload = self._payload(model, prompt, max_tokens, temperature, system,
                                      include_usage, force_output=force_output,
-                                     stop=stop, top_p=top_p, seed=seed, logprobs=logprobs)
+                                     stop=stop, top_p=top_p, seed=seed, logprobs=logprobs,
+                                     tools=tools, tool_choice=tool_choice)
         start = time.perf_counter()
         first: Optional[float] = None
         chunks = 0
@@ -245,6 +293,7 @@ class LLMClient:
         logprob_vals: list[float] = []
         parts: list[str] = []
         reasoning_parts: list[str] = []
+        tool_acc: dict = {}  # index -> {"name": str, "args": str} — streamed tool_calls
 
         # Ask explicitly for an SSE stream — some gateways only stream token-by-token
         # when the client advertises it (otherwise they buffer the whole response,
@@ -271,6 +320,7 @@ class LLMClient:
                         if ch.get("finish_reason"):
                             finish_reason = ch["finish_reason"]
                         _collect_logprobs(ch.get("logprobs"), logprob_vals)
+                        _accumulate_tool_calls(msg.get("tool_calls"), tool_acc)
                         if piece:
                             parts.append(piece)
                         if rpiece:
@@ -296,17 +346,22 @@ class LLMClient:
                         if ch.get("finish_reason"):
                             finish_reason = ch["finish_reason"]
                         _collect_logprobs(ch.get("logprobs"), logprob_vals)
+                        tc_delta = None
                         if "delta" in ch:
                             delta = ch.get("delta") or {}
                             piece = delta.get("content") or ""
                             rpiece = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                            tc_delta = delta.get("tool_calls")
                         else:
                             piece = ch.get("text") or ""
                             rpiece = ""
+                        if tc_delta:
+                            _accumulate_tool_calls(tc_delta, tool_acc)
                         # A reasoning model may stream only reasoning tokens (empty
-                        # content). Count those too, and set TTFT on the first token
-                        # of EITHER kind — otherwise streaming looks un-streamed.
-                        if piece or rpiece:
+                        # content), and a tool-calling response may carry no content
+                        # at all — count either as activity, and set TTFT on the
+                        # first token of ANY kind, or streaming looks un-streamed.
+                        if piece or rpiece or tc_delta:
                             if first is None:
                                 first = time.perf_counter()
                             chunks += 1
@@ -349,4 +404,5 @@ class LLMClient:
             stream_chunks=chunks,
             logprob_avg=(sum(logprob_vals) / len(logprob_vals)) if logprob_vals else None,
             reasoning="".join(reasoning_parts),
+            tool_calls=_finalize_tool_calls(tool_acc),
         )

@@ -6,6 +6,60 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
+### 2026-07-06 (Model-fit natiivne tool-calling; native-värav ka OpenRouterile; completions-serv)
+- **Model-fit testib nüüd natiivset tool-callingut** (OpenAI `tools` API), Hermes-prompt tagavarana.
+  Varem testis Model-fit **ainult** Hermes-`<tool_call>` konventsiooni, mistõttu natiivset tool-callingut
+  toetav (aga Hermes-XML-i mitte-emiteeriv) mudel sai valelt "EI SOBI (Hermes)". Nüüd krediteeritakse
+  mudelit, kui ta kutsub tööriista **kumbat tahes** viisi; ainult mudel, kes kumbagi ei tee, saab nulli.
+  Verdiktist eemaldatud "(Hermes)" spetsiifika.
+- **Model-fit sai "Lülita thinking testi ajaks välja" märkeruudu** (vaikimisi sees) — sama nagu
+  Provider-fit, et Qwen3-stiilis reasoning-mudelit testitakse agentses režiimis.
+- **Natiivne tool-calling gate'ib nüüd ka OpenRouteri verdiktit** (lisaks HuggingFace'ile) — router,
+  mis suunab tool-calling liiklust, vajab, et mudel `tools` API-t toetaks.
+- **Parandus:** Provider-fit natiivne tool-test näitab `/v1/completions` otspunktil ausalt
+  "n/a — completions-il pole tools API-t", mitte eksitavat "no tool_calls — model said: …"
+  (legacy completions-endpointile ei saagi `tools` parameetrit saata).
+
+### 2026-07-05 (thinking-välja-lülitamise valik Provider-fit'is)
+- **Uus märkeruut "Lülita thinking testi ajaks välja (testi agentset režiimi)"** — vaikimisi **sees**.
+  Saadab iga testi-päringuga `chat_template_kwargs.enable_thinking=false`, nii et Qwen3-stiilis
+  reasoning-mudelit testitakse tema **agentses (thinking-off) režiimis**. Põhjus: Provider-fit mõõdab,
+  kas backend suudab teenindada **agentset / tool-calling liiklust**, ja thinking-režiimis kipub selline
+  mudel "ülemõtlema" — arutleb proosas ja vastab otse, kutsumata tööriista, mistõttu tool-proovid
+  kukuvad kuigi mudel on võimekas. Ruudu saab maha võtta, et testida thinking-varianti nii-nagu-on.
+  Serverid, mis parameetrit ei toeta, lihtsalt ignoreerivad seda.
+- Klient (`client.py`) sai üldise `extra_body` läbiviigu — suvalised top-level request-body väljad
+  ühendatakse igasse päringusse (ilma parameetrit igale kutsele käsitsi läbi andmata).
+
+### 2026-07-05 (natiivne tool-calling test + diagnostika toorvastusega)
+- **Uus kontroll: "Tool calling (native API)"** — Provider-fit saadab nüüd päris OpenAI `tools`/
+  `tool_choice` API-parameetri (mitte ainult prompt-põhist Hermes-konventsiooni) ja loeb vastuse
+  `tool_calls` välja (nii streaming `delta.tool_calls` fragmentide kokkupanek kui non-streaming
+  `message.tool_calls`). See on tänapäeval **päris standard**, mida OpenRouter/vLLM/TGI/SGLang
+  kasutavad — vana Hermes-XML test testis vaid **ühte kindlat fine-tune'i konventsiooni**, mistõttu
+  hea, natiivset tool-callingut toetav mudel sai varem valelt "EI SOBI".
+  - Vana kontroll on ümber nimetatud **"Tool calling (Hermes prompt)"** ja jääb infoks (ei mõjuta enam
+    verdikti), samal ajal kui **"Tool calling (native API)" gate'ib nüüd HuggingFace'i verdikti**.
+  - Klient (`client.py`) sai `tools`/`tool_choice` läbiviigu ja `RequestResult.tool_calls` välja;
+    TTFT arvestab nüüd ka tool-call-only vastuseid (muidu näinuks voog "mitte-voogedastatuna").
+- **Ebaõnnestunud tool-call proovid näitavad nüüd toorvastust.** Varem kuvati lihtsalt "→ ∅" kui
+  midagi ei õnnestunud parsida — ei saanud vahet teha, kas mudel ignoreeris tööriistu täielikult
+  või proovis teises vormingus. Nüüd (nii Provider-fit'is kui Model-fit'is) näidatakse mudeli
+  tegelikku vastust (lühendatult), nii et jooks on ise-diagnoosiv.
+
+### 2026-07-05 (aken sobitub ekraaniga; Provider fit copy-nupud)
+- **Aken sobitub erineva suurusega ekraanidele** — akna algsuurus (ja Abi- ning Võrdlus-akende
+  suurus) arvutatakse nüüd ekraani mõõtude järgi (kuni 92%/88% laius/kõrgus, tsentreeritud), mitte
+  fikseeritud konstandi järgi. Varem võis 1400×1010 aken avaneda **suuremana kui väiksem kuvar**
+  (nt väiksem sülearvuti ekraan või tiled/split-screen paigutus). Minimaalne akna suurus on piiratud
+  **arvutatud algsuurusega, mitte ekraaniga eraldi** — ülevaatusel selgus, et kaks eri valemit oleks
+  väiksel ekraanil võinud `minsize`-i suuremaks arvutada kui algsuurus, mille peale Tk sunniks akna
+  kohe suuremaks (tühistades ekraanile-sobitamise); nüüd on `minsize ≤ algsuurus` alati tagatud.
+- **Provider fit — "Copy sweep table" ja "Copy report" nupud.** Esimene kopeerib paralleelsuse
+  sweep-tabeli (tab-eraldatud, nagu Benchmark/Optimum finder). Teine kopeerib **kogu testi
+  transkriptsiooni** (compliance + integrity + verdiktid) lõikelauale tavatekstina — täpselt
+  see, mida vajad tulemuse jagamiseks kolmanda osapoolega (nt inseneriga, kes hindab backend'i).
+
 ### 2026-07-05 (reasoning-mudelite tugi Provider-fit'is)
 - **Reasoning-mudelid** (nt DeepSeek-R1 / Qwen thinking) ei anna enam valet "EI SOBI" raportit.
   Varem: kui mudel pani nähtava vastuse `reasoning_content`-i ja väike token-eelarve kulus peidetud

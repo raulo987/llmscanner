@@ -106,8 +106,8 @@ TR_ET = {
     "Integrity probes — token-count honesty, context recall, model quality":
         "Aususe-proovid — token-loenduse ausus, konteksti tagasikutse, mudeli kvaliteet",
     # model-fit check labels
-    "Hermes tool-calling (valid <tool_call>, right tool & args, no spurious calls)":
-        "Hermes tööriista-kutsed (valiidne <tool_call>, õige tööriist & argumendid, ei valekutseid)",
+    "Tool-calling (native OpenAI tools API, Hermes-prompt fallback)":
+        "Tööriista-kutsed (natiivne OpenAI tools API, Hermes-prompti tagavara)",
     "Structured JSON output (strict, parseable, correct schema)":
         "Struktuurne JSON väljund (range, parse'itav, õige skeem)",
     "Instruction following & format discipline (no leaked reasoning)":
@@ -125,6 +125,9 @@ TR_ET = {
     "RAG (long context)": "RAG (pikk kontekst)", "Agent / batch": "Agent / batch",
     # history: compare + report
     "Compare selected": "Võrdle valitud", "Export report": "Ekspordi raport",
+    "Copy sweep table": "Kopeeri sweep-tabel", "Copy report": "Kopeeri raport",
+    "Disable thinking during test (test the agentic mode)":
+        "Lülita thinking testi ajaks välja (testi agentset režiimi)",
 }
 
 
@@ -385,12 +388,12 @@ INFO = {
         "• timeouts / hard errors → the server breaks under overload ✗"),
     # ---- Model fit (Openclaw / Hermes) ----
     "fit_tool": (
-        "Hermes-style function calling. The model gets a system prompt with tool "
-        "definitions in <tools> tags and must answer with a valid "
-        "<tool_call>{\"name\":…,\"arguments\":…}</tool_call> block. Scored on: does it "
-        "emit parseable tool JSON, pick the right tool, fill the right arguments, and "
-        "— crucially — NOT call a tool when the query needs a plain answer. This is "
-        "the core agentic capability Openclaw/Hermes depend on."),
+        "Function calling. The model is given tools via the native OpenAI `tools` "
+        "request parameter (what routers / vLLM / TGI / SGLang implement); a model "
+        "that only knows the prompt convention is also credited if it emits a Hermes "
+        "<tool_call> in the text. Scored on: does it call a tool, pick the right one, "
+        "fill the right arguments, and — crucially — NOT call a tool when the query "
+        "needs a plain answer. The core agentic capability."),
     "fit_json": (
         "Strict JSON output. The model is asked for a specific JSON shape with no prose "
         "or code fences. Scored on whether the reply parses as JSON and matches the "
@@ -436,6 +439,16 @@ INFO = {
         "model drops these.\n"
         "• Logprob fingerprint — the model's confidence on a trivial fact (informational; "
         "many servers don't expose logprobs)."),
+    "rd_nothink": (
+        "Send chat_template_kwargs.enable_thinking=false on every request, so a "
+        "Qwen3-style reasoning model is tested in its non-thinking (agentic) mode.\n\n"
+        "Why on by default: Provider fit measures whether the backend can serve "
+        "agentic / tool-calling traffic, and in thinking mode such a model tends to "
+        "'overthink' — it reasons in prose and answers directly instead of emitting a "
+        "tool call, so the tool-calling probes fail even though the model is capable. "
+        "Turning thinking off tests the mode that actually handles tools.\n\n"
+        "Uncheck it to test the thinking variant as-is. Servers that don't support the "
+        "parameter simply ignore it."),
     "rd_overload": (
         "After the sweep, run one extra level 25% above the top concurrency to test "
         "admission control: a router-grade backend rejects the excess cleanly with "
@@ -647,6 +660,10 @@ class LiveLog(ctk.CTkFrame):
         self.text.delete("1.0", "end")
         self.text.configure(state="disabled")
 
+    def get_text(self) -> str:
+        """The full logged transcript, as shown — for copying/sharing a run."""
+        return self.text.get("1.0", "end-1c")
+
     def write(self, msg: str, kind: str = "head"):
         self.text.configure(state="normal")
         # Keep the log bounded during long sessions.
@@ -680,8 +697,17 @@ class App:
             self._lang = "en"
         self.pal = _palette()
         self.root.title(APP_TITLE)
-        self.root.geometry("1400x1010")
-        self.root.minsize(1200, 900)
+        # Size to the screen rather than a fixed constant — on a smaller display
+        # (laptop, external monitor, tiled window) a hardcoded 1400x1010 can open
+        # larger than the screen itself. Clamp + center.
+        w, h = self._fit_size(1400, 1010)
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        x, y = max(0, (sw - w) // 2), max(0, (sh - h) // 2)
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
+        # minsize is a floor the user can shrink the window down to — it must never
+        # exceed the size just set above, or Tk immediately grows the window to
+        # satisfy it, undoing the screen-fit clamp on a small display.
+        self.root.minsize(min(1000, w), min(680, h))
         self._set_app_icon()
         self._style_trees()
         self.runner = AsyncRunner()
@@ -830,6 +856,25 @@ class App:
         """Translate a tab-UI literal (English is the key; untranslated → English)."""
         return TR_ET.get(s, s) if self._lang == "et" else s
 
+    def _fit_size(self, want_w: int, want_h: int, *,
+                 wfrac: float = 0.92, hfrac: float = 0.88) -> tuple:
+        """(w, h) clamped to fit the current screen — never larger than the
+        display it opens on."""
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        w = max(1, min(want_w, int(sw * wfrac)))
+        h = max(1, min(want_h, int(sh * hfrac)))
+        return w, h
+
+    def _sized_geometry(self, want_w: int, want_h: int, **kw) -> str:
+        """A `WxH+X+Y` geometry string sized to fit the current screen — clamped so
+        the window/dialog is never larger than the display it opens on, and
+        centered. Used for the main window and any Toplevel (Help, Compare)."""
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        w, h = self._fit_size(want_w, want_h, **kw)
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 2)
+        return f"{w}x{h}+{x}+{y}"
+
     def _build_settings_bar(self):
         """Top-right bar: Help, theme (light/dark/system) and language switch."""
         bar = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -910,7 +955,7 @@ class App:
             return
         win = ctk.CTkToplevel(self.root)
         win.title(self.t("help_title"))
-        win.geometry("720x620")
+        win.geometry(self._sized_geometry(720, 620))
         win.transient(self.root)
         self._help_win = win
         self._render_help(win)
@@ -1767,14 +1812,16 @@ class App:
         self.var_fit_json = tk.BooleanVar(value=True)
         self.var_fit_instruct = tk.BooleanVar(value=True)
         self.var_fit_latency = tk.BooleanVar(value=True)
+        self.var_fit_nothink = tk.BooleanVar(value=True)
 
-        sec, top = self._section(self.tab_fit, "Model fit — Openclaw / Hermes suitability")
+        sec, top = self._section(self.tab_fit, "Model fit — agentic suitability")
         sec.pack(fill="x", padx=12, pady=(10, 6))
 
         intro = ctk.CTkLabel(
             top, anchor="w", justify="left", text_color=self.pal["sub"],
             text=("Runs a battery of capability probes and grades whether the model is fit "
-                  "for agentic use (Hermes tool-calling). Verdict: SOBIB / PIIRIPEAL / EI SOBI."))
+                  "for agentic use (native tool-calling, with a Hermes-prompt fallback). "
+                  "Verdict: SOBIB / PIIRIPEAL / EI SOBI."))
         intro.grid(row=0, column=0, columnspan=4, sticky="w", padx=12, pady=(4, 6))
 
         def check(r, label, var, info):
@@ -1783,7 +1830,7 @@ class App:
             ctk.CTkCheckBox(fr, text=self.L(label), variable=var).pack(side="left")
             self._info_icon(fr, label, info).pack(side="left", padx=(5, 0))
 
-        check(1, "Hermes tool-calling (valid <tool_call>, right tool & args, no spurious calls)",
+        check(1, "Tool-calling (native OpenAI tools API, Hermes-prompt fallback)",
               self.var_fit_tool, INFO["fit_tool"])
         check(2, "Structured JSON output (strict, parseable, correct schema)",
               self.var_fit_json, INFO["fit_json"])
@@ -1791,6 +1838,8 @@ class App:
               self.var_fit_instruct, INFO["fit_instruct"])
         check(4, "Latency & throughput on these prompts",
               self.var_fit_latency, INFO["fit_latency"])
+        check(5, "Disable thinking during test (test the agentic mode)",
+              self.var_fit_nothink, INFO["rd_nothink"])
 
         runbar = ctk.CTkFrame(self.tab_fit, fg_color="transparent")
         runbar.pack(fill="x", padx=12, pady=4)
@@ -1839,9 +1888,12 @@ class App:
                                ("latency", self.var_fit_latency)) if v.get()]
         if not dims or dims == ["latency"]:
             return self._error(ValueError("Select at least one capability dimension to test."))
+        no_think = bool(self.var_fit_nothink.get())
+        extra_body = {"chat_template_kwargs": {"enable_thinking": False}} if no_think else None
         client = LLMClient.from_target(
             target, api_key=self.var_apikey.get().strip() or "EMPTY",
-            timeout=float(self.var_timeout.get() or 95), endpoint=self.var_endpoint.get())
+            timeout=float(self.var_timeout.get() or 95), endpoint=self.var_endpoint.get(),
+            extra_body=extra_body)
         self._remember_endpoint(target.host, target.port)
         # Stash connection + params so _modelfit_done can persist the result to
         # History and show the run-over-run comparison, like the Benchmark tab.
@@ -1851,7 +1903,8 @@ class App:
             self.fit_tree.delete(iid)
         self.fit_log.clear()
         self.fit_log.write(f"▶ Model fit · {client.base_url}", "head")
-        self.fit_log.write(f"        dimensions: {', '.join(dims)}", "dim")
+        thinkdesc = "thinking OFF (agentic mode)" if no_think else "thinking as-configured"
+        self.fit_log.write(f"        dimensions: {', '.join(dims)} · {thinkdesc}", "dim")
         self.fit_readout.configure(text="Running probes…")
 
         def on_progress(evt):
@@ -1888,8 +1941,8 @@ class App:
         sc = report.get("scores", {})
         if "tool" in report:
             t = report["tool"]
-            rows.append(("Hermes tool-calling", f"{sc.get('tool', 0) * 100:.0f}%"))
-            rows.append(("  valid tool JSON", f"{t['valid_rate'] * 100:.0f}%"))
+            rows.append(("Tool-calling", f"{sc.get('tool', 0) * 100:.0f}%"))
+            rows.append(("  valid tool call", f"{t['valid_rate'] * 100:.0f}%"))
             rows.append(("  correct tool", f"{t['select_rate'] * 100:.0f}%"))
             rows.append(("  correct arguments", f"{t['arg_rate'] * 100:.0f}%"))
             rows.append(("  spurious calls (should be 0)", f"{t['falsecall_rate'] * 100:.0f}%"))
@@ -1931,6 +1984,7 @@ class App:
         self.var_rd_overload = tk.BooleanVar(value=True)
         self.var_rd_distinct = tk.BooleanVar(value=True)
         self.var_rd_integrity = tk.BooleanVar(value=True)
+        self.var_rd_nothink = tk.BooleanVar(value=True)
 
         sec, top = self._section(self.tab_ready,
                                  "Provider fit — OpenRouter / HuggingFace readiness")
@@ -1969,6 +2023,11 @@ class App:
         ctk.CTkCheckBox(fr2, text=self.L("Distinct request prefixes (spread across backends)"),
                         variable=self.var_rd_distinct).pack(side="left")
         self._info_icon(fr2, "Distinct request prefixes", INFO["rd_distinct"]).pack(side="left", padx=(5, 0))
+        fr3 = ctk.CTkFrame(top, fg_color="transparent")
+        fr3.grid(row=7, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
+        ctk.CTkCheckBox(fr3, text=self.L("Disable thinking during test (test the agentic mode)"),
+                        variable=self.var_rd_nothink).pack(side="left")
+        self._info_icon(fr3, "Disable thinking", INFO["rd_nothink"]).pack(side="left", padx=(5, 0))
 
         runbar = ctk.CTkFrame(self.tab_ready, fg_color="transparent")
         runbar.pack(fill="x", padx=12, pady=4)
@@ -1980,6 +2039,10 @@ class App:
                                          command=self.cancel_current)
         btn_ready_cancel.pack(side="left", padx=8)
         self._cancel_btns.append(btn_ready_cancel)
+        ctk.CTkButton(runbar, text=self.L("Copy sweep table"), width=140,
+                      command=self.copy_readiness_table).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(runbar, text=self.L("Copy report"), width=110,
+                      command=self.copy_readiness_report).pack(side="left", padx=(0, 8))
         ctk.CTkLabel(runbar, text="Compliance probes then a concurrency sweep — raise the "
                                   "Timeout for large output sizes.",
                      text_color=self.pal["sub"]).pack(side="left", padx=10)
@@ -2029,14 +2092,20 @@ class App:
                 "integrity": bool(self.var_rd_integrity.get()),
                 "overload": bool(self.var_rd_overload.get()),
                 "distinct_prefix": bool(self.var_rd_distinct.get()),
+                "no_think": bool(self.var_rd_nothink.get()),
                 "timeout": float(self.var_timeout.get() or 95),
             }
         except ValueError as e:
             return self._error(ValueError(f"Invalid number: {e}"))
 
+        # Disable a Qwen3-style reasoning model's thinking for the whole test, so
+        # the tool/agentic probes see the agentic mode (not chain-of-thought that
+        # "overthinks" and answers in prose instead of calling the tool).
+        extra_body = {"chat_template_kwargs": {"enable_thinking": False}} if cfg["no_think"] else None
         client = LLMClient.from_target(
             target, api_key=self.var_apikey.get().strip() or "EMPTY",
-            timeout=cfg["timeout"], endpoint=self.var_endpoint.get())
+            timeout=cfg["timeout"], endpoint=self.var_endpoint.get(),
+            extra_body=extra_body)
         self._remember_endpoint(target.host, target.port)
         # Stash for History persistence in _readiness_done (like the other tabs).
         self._rd_conn = (client.host, client.port, client.endpoint)
@@ -2049,8 +2118,10 @@ class App:
         self.ready_chart.clear()
         self.ready_log.clear()
         self.ready_log.write(f"▶ Provider fit · {client.base_url}", "head")
+        thinkdesc = "thinking OFF (agentic mode)" if cfg["no_think"] else "thinking as-configured"
         self.ready_log.write(f"        sweep {levels} · in {cfg['in_tokens']} / out "
-                             f"{cfg['out_tokens']} tok · TTFT SLA {cfg['ttft_sla_s']:g}s", "dim")
+                             f"{cfg['out_tokens']} tok · TTFT SLA {cfg['ttft_sla_s']:g}s · "
+                             f"{thinkdesc}", "dim")
         self.ready_readout.configure(text="Running compliance probes…")
 
         def on_progress(evt):
@@ -2188,6 +2259,28 @@ class App:
         for c in report["compliance"]:
             rows.append((c["name"], "✓" if c["ok"] else "✗"))
         return rows
+
+    def copy_readiness_table(self):
+        """Copy the concurrency-sweep table (tab-separated), like Benchmark/Optimum finder."""
+        if not self.ready_tree.get_children():
+            messagebox.showinfo(APP_TITLE, "No provider-fit results to copy yet — run a test first.")
+            return
+        rows = self._tree_to_rows(self.ready_tree)
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join("\t".join(row) for row in rows))
+        self._set_status(f"Copied sweep table ({len(rows) - 1} rows) to the clipboard.")
+        self.ready_log.write(f"📋 Copied sweep table ({len(rows) - 1} rows) to clipboard", "ok")
+
+    def copy_readiness_report(self):
+        """Copy the full test transcript (compliance/integrity/verdicts) as plain text."""
+        text = self.ready_log.get_text().strip()
+        if not text:
+            messagebox.showinfo(APP_TITLE, "No provider-fit report to copy yet — run a test first.")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self._set_status("Copied the provider-fit report to the clipboard.")
+        self.ready_log.write("📋 Copied full report to clipboard", "ok")
 
     def _build_scan_tab(self):
         sec, top = self._section(self.tab_scan, "Scan settings")
@@ -2498,7 +2591,7 @@ class App:
         order, per = self._merged_metric_order(rows)
         win = ctk.CTkToplevel(self.root)
         win.title("Compare runs")
-        win.geometry(f"{min(1280, 320 + 210 * len(rows))}x600")
+        win.geometry(self._sized_geometry(320 + 210 * len(rows), 600))
         win.transient(self.root)
         cols = ["metric"] + [f"r{i}" for i in range(len(rows))]
         wrap, tree = self._tree_with_scrollbars(win, cols, height=20, horizontal=True)
