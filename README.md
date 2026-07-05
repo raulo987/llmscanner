@@ -70,6 +70,14 @@ rasket Qt-installi) ja lisaks boonusena käsurea-liides skriptimiseks.
 - 🌐 **Keel** – **inglise (primary) ja eesti**; valik jäetakse meelde ja rakendub kohe. Tõlgitud on
   vahekaartide nimed, sektsioonide pealkirjad, väljade sildid, nupud ja checkbox'id; ⓘ-abitekstid ja
   pikad kirjeldused jäävad inglise keelde (fallback).
+- ⚡ **Koormuse eelseaded** – Connection-tabil **Vestlus / RAG / Agent** nupud täidavad ühe klõpsuga
+  mõistlikud parameetrid Benchmark-, Soak- ja Provider-fit-tabidel.
+- 🆚 **Risthost/-mudel võrdlus** – History-tabil vali mitu rida (Cmd/Shift-klõps) → **"Võrdle valitud"**
+  kõrvutine tabel (mõõdikud × jooksud) üle erinevate serverite/mudelite/konfigide.
+- 🧾 **Jagatav raport** – **"Ekspordi raport"** salvestab valitud jooksu(d) Markdown/HTML-failina
+  (metaandmed + mõõdikute tabel; mitu valikut → võrdlustabel).
+- 🔔 **Valmimise-teavitused ja kiirklahvid** – macOS notification + heli, kui pikk test lõpeb;
+  Cmd+R (käivita aktiivse tabi test), Cmd+. / Esc (peata), Cmd+D (detect), Cmd+L (mudelid).
 
 ## Paigaldus (macOS)
 
@@ -452,6 +460,42 @@ Tulemus salvestub History-sse (tipp-tok/s), nii et näed jooksude-vahelist muutu
 > kvantimise-fingerprint** nõuaks referents-logprobe iga mudeli kohta (meil on ainult enesekindluse
 > proxy). Need jäävad teadlikult katmata.
 
+## Eelseaded, võrdlus ja raportid
+
+### Koormuse eelseaded
+
+**Connection**-tabil on kolm nuppu, mis täidavad ühe klõpsuga mõistlikud parameetrid **korraga**
+Benchmark-, Soak- ja Provider-fit-tabidel — nii ei pea iga välja käsitsi sättima:
+
+| Eelseade | Kirjeldus | Näide (in / out / concurrency) |
+|---|---|---|
+| **Vestlus** | Lühikesed promptid, lühikesed vastused, mõõdukas paralleelsus (interaktiivne chat) | ~1k / 256 / 8–32 |
+| **RAG (pikk kontekst)** | Suur sisend, mõõdukas väljund | ~8k / 256–500 / 8–16 |
+| **Agent / batch** | Kõrge paralleelsus, lühike struktuurne väljund | ~2k / 384 / 32–64 |
+
+Väärtused on lähtepunkt — muuda neid pärast vajadusel käsitsi.
+
+### Risthost/-mudel võrdlus
+
+**History**-tabil vali **mitu rida** (Cmd/Shift-klõps) ja vajuta **"Võrdle valitud"** — avaneb
+kõrvutine tabel: **read = mõõdikud, veerud = jooksud** (märgistatud `host:port · mudel · test`).
+Erinevalt tavalisest jooksude-vahelisest võrdlusest (mis grupeerub sama konfigi järgi) töötab see
+**üle erinevate serverite, mudelite ja konfiguratsioonide** — st päris "server A vs server B" või
+"mudel X vs mudel Y".
+
+### Jagatav raport
+
+**"Ekspordi raport"** salvestab valitud jooksu(d) **Markdown**- või **HTML**-failina (vali laiendi
+järgi). Üksik jooks annab metaandmed + mõõdikute tabeli; mitu valikut annab võrdlustabeli. Sama nupp
+on ka võrdlus-aknas. Kõik tulemused on lisaks eksporditavad **CSV**-na ("Export CSV…").
+
+### Mugavus
+
+- **Valmimise-teavitused** — kui pikk test (≥ 8 s) lõpeb, tuleb macOS desktop-notification + heli
+  (nii saad testi ajal eemale minna).
+- **Kiirklahvid** — `Cmd+R` käivitab aktiivse tabi testi, `Cmd+.` / `Esc` peatab, `Cmd+D` tuvastab
+  serveri, `Cmd+L` loetleb mudelid.
+
 ## Kuidas see töötab
 
 - **Kiiruse mõõtmine** kasutab voogedastust (`stream=True`): aeg esimese tokenini (TTFT)
@@ -488,13 +532,33 @@ llmscanner/
 │   └── icon.png  # genereeritud aknaikoon
 ├── models.py     # andmeklassid (ServerInfo, RequestResult)
 └── util.py       # abifunktsioonid + Target / resolve_target (nutika host-välja parsimine)
+
+app_entry.py      # PyInstaller entry point (käivitab GUI)
+build_macos.sh    # ehitab iseseisva ühe-faililise macOS executable'i (dist/LLMScanner)
+run.sh            # käivitab rakenduse (loob venv + install esimesel korral)
+run.command       # topeltklõpsatav macOS Finderi käivitaja
+CHANGELOG.md      # muudatuste logi
 ```
 
 GUI sisemus: korduvkasutatavad komponendid `ChartCanvas` (kerge joongraafik) ja `LiveLog`
 (voogedastav värviline logi) jagatakse tabide vahel; tabelid on `ttk.Treeview`, mis on stiilitud
 CustomTkinteri välimuse järgi (sebra, ümberjärjestatavad tulbad).
 
+### Abi, teema ja keel
+
+Akna **üleval paremal** on seaderiba:
+
+- **❔ Abi / Help** — avab juhendi (vahekaartide ülevaade + näpunäited) ning infrastruktuuri
+  (**Visioline Infra**) ja toe (**support@itteam.eu**) kontaktid.
+- **Teema** — Süsteem / Hele / Tume; rakendub kohe.
+- **Keel** — inglise (primary) / eesti.
+
+Teema ja keele valik **jäetakse meelde** (salvestub `~/.llmscanner`-i) ja taastub järgmisel
+käivitusel. Keele vahetus ehitab vahekaardid uuesti — seda ei tehta jooksva testi ajal.
+
 ### Andmete asukoht
 
-Salvestatud hostid ja kõik testitulemused hoitakse failis `~/.llmscanner/llmscanner.db`
-(SQLite). Asukohta saab muuta keskkonnamuutujaga `LLMSCANNER_HOME`.
+Salvestatud hostid, kõik testitulemused ja seaded (teema, keel) hoitakse failis
+`~/.llmscanner/llmscanner.db` (SQLite). Asukohta saab muuta keskkonnamuutujaga `LLMSCANNER_HOME`.
+
+Muudatuste ajalugu on failis [CHANGELOG.md](CHANGELOG.md).

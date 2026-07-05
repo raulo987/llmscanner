@@ -120,6 +120,11 @@ TR_ET = {
         "Vali kontrollid ja vajuta ‘Käivita model-fit test’.",
     "Set the traffic shape and press ‘Run provider-fit test’.":
         "Sea liikluse kuju ja vajuta ‘Käivita provider-fit test’.",
+    # presets
+    "Workload preset:": "Koormuse eelseade:", "Chat": "Vestlus",
+    "RAG (long context)": "RAG (pikk kontekst)", "Agent / batch": "Agent / batch",
+    # history: compare + report
+    "Compare selected": "Võrdle valitud", "Export report": "Ekspordi raport",
 }
 
 
@@ -947,6 +952,13 @@ class App:
         self.status = ctk.CTkLabel(bar, text=self.t("ready"), anchor="w")
         self.status.pack(side="left", fill="x", expand=True)
 
+        # Keyboard shortcuts (bound on root, so they survive a tabview rebuild).
+        self.root.bind("<Command-r>", self._run_active_tab)
+        self.root.bind("<Command-period>", lambda e: self.cancel_current())
+        self.root.bind("<Escape>", lambda e: self.cancel_current())
+        self.root.bind("<Command-d>", lambda e: self.on_detect())
+        self.root.bind("<Command-l>", lambda e: self.on_list_models())
+
     def _build_tabs(self):
         """Create the tabview and all tabs. Split out so a language switch can
         rebuild it (tab names are set at creation and can't be renamed live)."""
@@ -1030,6 +1042,16 @@ class App:
         self.btn_detect.pack(side="left")
         self.btn_models = ctk.CTkButton(btns, text=self.L("List models"), command=self.on_list_models)
         self.btn_models.pack(side="left", padx=8)
+
+        # One-click workload presets — fill sensible parameters across the
+        # Benchmark, Soak and Provider-fit tabs.
+        pf = ctk.CTkFrame(self.tab_conn, fg_color="transparent")
+        pf.pack(fill="x", padx=12, pady=(6, 0))
+        ctk.CTkLabel(pf, text=self.L("Workload preset:")).pack(side="left")
+        for key, label in (("Chat", "Chat"), ("RAG", "RAG (long context)"),
+                           ("Agent", "Agent / batch")):
+            ctk.CTkButton(pf, text=self.L(label), width=130,
+                          command=lambda k=key: self._apply_preset(k)).pack(side="left", padx=(8, 0))
 
         sec2, body2 = self._section(self.tab_conn, "Server info")
         sec2.pack(fill="both", expand=True, padx=12, pady=12)
@@ -2206,6 +2228,10 @@ class App:
         bar.pack(fill="x", padx=12, pady=8)
         ctk.CTkButton(bar, text=self.L("Refresh"), width=80, command=self.refresh_history).pack(side="left")
         ctk.CTkButton(bar, text=self.L("Export CSV…"), width=100, command=self.export_history).pack(side="left", padx=6)
+        ctk.CTkButton(bar, text=self.L("Compare selected"), width=130,
+                      command=self._compare_selected).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(bar, text=self.L("Export report"), width=120,
+                      command=self._export_report).pack(side="left", padx=(0, 6))
         ctk.CTkButton(bar, text=self.L("Clear all"), width=80, fg_color="#b04a4a", hover_color="#963c3c",
                       command=self.clear_history).pack(side="left")
         self._lbl(bar, "Filter:", INFO["hist_filter"]).pack(side="left", padx=(16, 4))
@@ -2232,8 +2258,8 @@ class App:
         self.history_tree.bind("<<TreeviewSelect>>", self._on_history_select)
 
         ctk.CTkLabel(self.tab_history,
-                     text="Click a heading to sort · drag headings to reorder · drag borders to "
-                          "resize · type to filter · select a row to chart it.").pack(
+                     text="Click a heading to sort · type to filter · select a row to chart it · "
+                          "Cmd/Shift-click several rows, then ‘Compare selected’ or ‘Export report’.").pack(
             anchor="w", padx=14)
         self.history_chart = ChartCanvas(self.tab_history, height=170)
         self.history_chart.pack(fill="x", padx=12, pady=(2, 10))
@@ -2426,6 +2452,118 @@ class App:
                             r["endpoint"], r["test_type"], r["config_hash"], r["summary"]])
         self._set_status(f"Exported {len(rows)} result(s) to {path}")
 
+    # ------------------------------------------------- compare / report export
+    def _selected_results(self) -> list:
+        """Result dicts for the selected history rows, in view order."""
+        return [self._hist_by_iid[i] for i in self.history_tree.selection()
+                if i in self._hist_by_iid]
+
+    @staticmethod
+    def _result_metrics(r) -> list:
+        """The (label, value) metric rows stored with a result."""
+        try:
+            data = json.loads(r["metrics_json"] or "{}")
+            return [(str(k), str(v)) for k, v in (data.get("rows") or [])]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _result_label(r) -> str:
+        return f'{r["host"]}:{r["port"]} · {r["model"] or "?"} · {r["test_type"]}'
+
+    def _merged_metric_order(self, rows) -> tuple:
+        """Union of metric labels (first-seen order) + per-run {label: value}."""
+        order, seen, per = [], set(), []
+        for r in rows:
+            m = self._result_metrics(r)
+            per.append(dict(m))
+            for k, _ in m:
+                if k not in seen:
+                    seen.add(k)
+                    order.append(k)
+        return order, per
+
+    def _compare_selected(self):
+        """Side-by-side comparison of the selected runs — across hosts/models/configs."""
+        rows = self._selected_results()
+        if len(rows) < 2:
+            messagebox.showinfo(APP_TITLE, "Select 2+ history rows (Cmd/Shift-click) to compare.")
+            return
+        order, per = self._merged_metric_order(rows)
+        win = ctk.CTkToplevel(self.root)
+        win.title("Compare runs")
+        win.geometry(f"{min(1280, 320 + 210 * len(rows))}x600")
+        win.transient(self.root)
+        cols = ["metric"] + [f"r{i}" for i in range(len(rows))]
+        wrap, tree = self._tree_with_scrollbars(win, cols, height=20, horizontal=True)
+        tree.heading("metric", text="Metric")
+        tree.column("metric", width=240, minwidth=140, anchor="w", stretch=False)
+        for i, r in enumerate(rows):
+            tree.heading(f"r{i}", text=self._result_label(r))
+            tree.column(f"r{i}", width=200, minwidth=110, anchor="w", stretch=False)
+        tree.insert("", "end", tags=("even",),
+                    values=["summary"] + [(r["summary"] or "") for r in rows])
+        tree.insert("", "end", tags=("odd",),
+                    values=["when"] + [_fmt_ts(r["ts"]) for r in rows])
+        for n, k in enumerate(order):
+            tree.insert("", "end", tags=("even" if n % 2 else "odd",),
+                        values=[k] + [per[i].get(k, "–") for i in range(len(rows))])
+        wrap.pack(fill="both", expand=True, padx=10, pady=10)
+        ctk.CTkButton(win, text=self.L("Export report"), width=140,
+                      command=lambda: self._export_report(rows)).pack(pady=(0, 10))
+
+    def _markdown_report(self, rows) -> str:
+        out = ["# LLM Scanner report", ""]
+        if len(rows) == 1:
+            r = rows[0]
+            out += [f"- **Test:** {r['test_type']}",
+                    f"- **Server:** {r['host']}:{r['port']}",
+                    f"- **Model:** {r['model'] or '?'}",
+                    f"- **Endpoint:** {r['endpoint']}",
+                    f"- **When:** {_fmt_ts(r['ts'])}",
+                    f"- **Summary:** {r['summary'] or ''}", "",
+                    "| Metric | Value |", "|---|---|"]
+            for k, v in self._result_metrics(r):
+                out.append(f"| {k} | {v} |")
+        else:
+            order, per = self._merged_metric_order(rows)
+            heads = [self._result_label(r) for r in rows]
+            esc = lambda s: str(s).replace("|", "\\|")
+            out += ["## Comparison", "",
+                    "| Metric | " + " | ".join(esc(h) for h in heads) + " |",
+                    "|" + "---|" * (len(rows) + 1),
+                    "| summary | " + " | ".join(esc(r["summary"] or "") for r in rows) + " |",
+                    "| when | " + " | ".join(_fmt_ts(r["ts"]) for r in rows) + " |"]
+            for k in order:
+                out.append(f"| {esc(k)} | "
+                           + " | ".join(esc(per[i].get(k, "–")) for i in range(len(rows))) + " |")
+        out += ["", f"_Generated by LLM Scanner · {_fmt_ts(time.time())}_"]
+        return "\n".join(out)
+
+    def _export_report(self, rows=None):
+        rows = rows or self._selected_results()
+        if not rows:
+            messagebox.showinfo(APP_TITLE, "Select one or more history rows to export a report.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export report", defaultextension=".md",
+            initialfile="llmscanner-report.md",
+            filetypes=[("Markdown", "*.md"), ("HTML", "*.html")])
+        if not path:
+            return
+        md = self._markdown_report(rows)
+        if path.lower().endswith(".html"):
+            body = md.replace("&", "&amp;").replace("<", "&lt;")
+            content = ("<!doctype html><meta charset=\"utf-8\">"
+                       "<title>LLM Scanner report</title>"
+                       "<pre style=\"font:14px/1.5 -apple-system,monospace;padding:24px\">"
+                       f"{body}</pre>")
+        else:
+            content = md
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        self._set_status(f"Exported report ({len(rows)} run(s)) to {path}")
+
     # --------------------------------------------------------------- threading
     def post(self, fn):
         self.ui_queue.put(fn)
@@ -2452,11 +2590,13 @@ class App:
             messagebox.showinfo(APP_TITLE, "A task is already running — please wait.")
             return
         self._set_busy(True, status)
+        self._run_started = time.perf_counter()
+        self._run_label = status
 
         def done_cb(fut):
             try:
                 res = fut.result()
-                self.post(lambda: self._finish(lambda: on_done(res)))
+                self.post(lambda: self._finish(lambda: on_done(res), notify=True))
             except (concurrent.futures.CancelledError, asyncio.CancelledError):
                 self.post(lambda: self._finish(self._on_cancelled))
             except Exception as e:
@@ -2479,17 +2619,90 @@ class App:
             if log is not None:
                 log.write("✗ Cancelled by user", "err")
 
-    def _finish(self, fn):
+    def _finish(self, fn, notify=False):
         self._set_busy(False)
         fn()
+        # Desktop notification when a long-running test completes, so you can
+        # walk away from it. Only for genuine completions (not cancel/error).
+        started = getattr(self, "_run_started", None)
+        self._run_started = None
+        if notify and started is not None:
+            elapsed = time.perf_counter() - started
+            if elapsed >= 8.0 and store.get_setting("notify", "1") == "1":
+                label = getattr(self, "_run_label", "Test").rstrip("… ")
+                if label.lower().endswith("running"):
+                    label = label[:-len("running")].rstrip(" –-")
+                self._notify(APP_TITLE, f"✓ {label} complete · {self._fmt_hms(elapsed)}")
+
+    def _notify(self, title: str, message: str):
+        """Best-effort macOS desktop notification with a sound."""
+        try:
+            import subprocess
+            script = (f'display notification {json.dumps(message)} '
+                      f'with title {json.dumps(title)} sound name "Glass"')
+            subprocess.Popen(["osascript", "-e", script],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    def _run_active_tab(self, _e=None):
+        """Cmd+R — run the test on whichever tab is showing."""
+        if self._busy:
+            return
+        runners = {
+            "Connection": self.on_detect, "Benchmark": self.on_run_bench,
+            "Optimum finder": self.on_run_optima, "Soak": self.on_run_soak,
+            "Model fit": self.on_run_modelfit, "Provider fit": self.on_run_readiness,
+            "Network scan": self.on_scan,
+        }
+        try:
+            current = self.tabview.get()
+        except Exception:
+            return
+        # tabview.get() returns the (possibly translated) name; match via L().
+        for en, fn in runners.items():
+            if current == self.L(en):
+                fn()
+                return
+
+    _PRESETS = {
+        # Interactive chat: short prompts, short answers, modest concurrency.
+        "Chat": {"var_tokens": "256", "var_ctx": "1024", "var_conc": "8", "var_reqs": "32",
+                 "var_sweep": "1,2,4,8,16", "var_soak_conc": "32", "var_soak_in": "1024",
+                 "var_soak_out": "256", "var_soak_dur": "5", "var_rd_in": "1024",
+                 "var_rd_out": "256", "var_rd_sweep": "1,4,8,16,32"},
+        # RAG: large context in, moderate output.
+        "RAG": {"var_tokens": "512", "var_ctx": "8192", "var_conc": "8", "var_reqs": "32",
+                "var_sweep": "1,2,4,8", "var_soak_conc": "16", "var_soak_in": "8000",
+                "var_soak_out": "500", "var_soak_dur": "5", "var_rd_in": "8192",
+                "var_rd_out": "256", "var_rd_sweep": "1,4,8,16"},
+        # Agentic / batch: high concurrency, short structured output.
+        "Agent": {"var_tokens": "384", "var_ctx": "2048", "var_conc": "32", "var_reqs": "64",
+                  "var_sweep": "1,4,8,16,32,64", "var_soak_conc": "64", "var_soak_in": "2048",
+                  "var_soak_out": "384", "var_soak_dur": "5", "var_rd_in": "2048",
+                  "var_rd_out": "384", "var_rd_sweep": "1,8,16,32,64"},
+    }
+
+    def _apply_preset(self, name: str):
+        preset = self._PRESETS.get(name)
+        if not preset:
+            return
+        for var_name, value in preset.items():
+            var = getattr(self, var_name, None)
+            if var is not None:
+                var.set(value)
+        self._set_status(f"Applied '{name}' workload preset "
+                         "(Benchmark / Soak / Provider fit).")
 
     # ------------------------------------------------------------- UI helpers
     def _set_busy(self, busy: bool, status: str = ""):
         self._busy = busy
         state = "disabled" if busy else "normal"
-        for b in (self.btn_detect, self.btn_models, self.btn_run, self.btn_scan,
-                  self.btn_opt, self.btn_soak, self.btn_fit):
-            b.configure(state=state)
+        for name in ("btn_detect", "btn_models", "btn_run", "btn_scan",
+                     "btn_opt", "btn_soak", "btn_fit", "btn_ready"):
+            b = getattr(self, name, None)
+            if b is not None:
+                b.configure(state=state)
         # Cancel buttons are the inverse: only usable while a task is running.
         for b in self._cancel_btns:
             b.configure(state="normal" if busy else "disabled")
@@ -2504,7 +2717,7 @@ class App:
             self.progress.stop()
             self.progress.configure(mode="determinate")
             self.progress.set(0)
-            self._set_status("Ready.")
+            self._set_status(self.t("ready"))
 
     def _set_status(self, text: str):
         self.status.configure(text=text)
