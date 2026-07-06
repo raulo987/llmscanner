@@ -21,6 +21,18 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 - Backend: `capacity_test()` + `_capacity_levels()` (benchmark.py); GUI: `_build_capacity_tab` +
   handlerid, eestikeelsed tõlked, Cmd+R tugi. Nagu Optimum finder / Soak, on ka Capacity koormustest.
 
+### 2026-07-06 (Capacity-tabi visuaalne lihv + täpsem diagnostika)
+- **Graafik loetavam:** teljesildid nüüd kompaktsed (31.2M, mitte 31242857) — parandus kehtib
+  kõigile graafikutele (Soak, Benchmark jt). Capacity-kõveral on **saturatsioonipunktid punased**
+  ja **tipp rõngastatud** rohelise "peak"-markeriga.
+- **Verdikt värviline:** suur readout läheb tulemusega roheliseks (võimsus leitud / target täidetud)
+  või punaseks (target täitmata / püsivat võimsust pole); target-tulemus (✅/❌) on nüüd ka readout'is.
+  Logi sammuread joondatud veergudesse, ebatervete tasemete juures ⚠.
+- **Täpsem diagnostika:** kui ükski päring ei jõua mõõteakna sees valmis (aken lühem kui päringu
+  kestus), öeldakse nüüd selgelt *"no request finished inside the measurement window (a request
+  takes ~Xs vs Ys window) — raise ‘Window / step’"* varasema eksitava "output truncated" asemel.
+- Backend emitib `step_done` hetkeseisu nüüd värske peak'iga (varem jäi readout sammu võrra maha).
+
 ### 2026-07-06 (Hermes tööriista-proov nüüd tagavara, mitte alati)
 - **Provider-fit'i "Tool calling (Hermes prompt)" kontroll on nüüd TAGAVARA** — see jookseb ainult siis,
   kui natiivne `tools` API-kontroll (mis gate'ib verdikti) ei tööta. Natiivse tööriista-kutsega mudel

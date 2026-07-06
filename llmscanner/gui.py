@@ -409,7 +409,10 @@ INFO = {
     "cap_window": (
         "How long to hold each concurrency level, in seconds. The first ~third is discarded "
         "as warm-up (queue fill / cold KV cache); the steady-state tok/min is measured over "
-        "the rest. 30–60 s per step gives a stable number without dragging the whole ramp out."),
+        "the rest. 30–60 s per step gives a stable number without dragging the whole ramp out.\n\n"
+        "Make it comfortably LONGER than one request takes (see latency p95 in Benchmark) — "
+        "if no request finishes inside the window, that level can't be measured and the run "
+        "stops with a 'raise Window / step' note."),
     "cap_target": (
         "Optional. Your required capacity in tokens per minute (e.g. a contracted TPM or the "
         "peak load you must serve). If set, the result adds a PASS/FAIL: does the measured "
@@ -550,26 +553,51 @@ class AsyncRunner:
 
 
 class ChartCanvas(tk.Canvas):
-    """A tiny dependency-free, appearance-aware line chart on a tk.Canvas."""
+    """A tiny dependency-free, appearance-aware line chart on a tk.Canvas.
+
+    Points are (label, value) or (label, value, kind) tuples; kind "err"/"warn"
+    colours that marker (e.g. a saturated load level). `mark` names one index to
+    ring-highlight with a caption (e.g. the capacity peak).
+    """
 
     def __init__(self, parent, height=160, **kw):
         super().__init__(parent, height=height, bg=_palette()["canvas_bg"],
                          highlightthickness=0, **kw)
-        self._points: list[tuple[str, float | None]] = []
+        self._points: list[tuple] = []
         self._title = ""
         self._unit = ""
+        self._mark: int | None = None
+        self._mark_text = ""
         self.bind("<Configure>", lambda e: self._redraw())
 
-    def plot(self, points, title="", unit=""):
+    def plot(self, points, title="", unit="", mark: int | None = None, mark_text=""):
         self._points = list(points)
         self._title = title
         self._unit = unit
+        self._mark = mark
+        self._mark_text = mark_text
         self._redraw()
 
     def clear(self):
         self._points = []
         self._title = ""
+        self._mark = None
+        self._mark_text = ""
         self._redraw()
+
+    @staticmethod
+    def _fmt_val(v: float) -> str:
+        """Compact number for axis / point labels (31 242 857 → '31.2M')."""
+        a = abs(v)
+        if a >= 1e9:
+            return f"{v / 1e9:.1f}B"
+        if a >= 1e6:
+            return f"{v / 1e6:.1f}M"
+        if a >= 1e4:
+            return f"{v / 1e3:.0f}K"
+        if a >= 1e3:
+            return f"{v / 1e3:.1f}K"
+        return f"{v:.1f}" if a < 10 and v != int(v) else f"{v:.0f}"
 
     def _redraw(self):
         self.delete("all")
@@ -581,7 +609,7 @@ class ChartCanvas(tk.Canvas):
         if self._title:
             self.create_text(8, 4, anchor="nw", text=self._title, fill=p["txt"],
                              font=("TkDefaultFont", 11, "bold"))
-        pts = [(i, v) for i, (_lbl, v) in enumerate(self._points) if v is not None]
+        pts = [(i, t[1]) for i, t in enumerate(self._points) if t[1] is not None]
         if not pts:
             self.create_text(w // 2, h // 2, text="(no data — run a test to chart it)",
                              fill=p["sub"])
@@ -608,7 +636,7 @@ class ChartCanvas(tk.Canvas):
             yy = sy(yv)
             if frac != 0.0:
                 self.create_line(x0, yy, x1, yy, fill=p["grid"])
-            self.create_text(x0 - 6, yy, anchor="e", text=f"{yv:.0f}",
+            self.create_text(x0 - 6, yy, anchor="e", text=self._fmt_val(yv),
                              fill=p["sub"], font=("TkDefaultFont", 8))
 
         coords = []
@@ -616,12 +644,28 @@ class ChartCanvas(tk.Canvas):
             coords += [sx(i), sy(v)]
         if len(coords) >= 4:
             self.create_line(*coords, fill=p["line"], width=2)
+        kind_fill = {"err": p["live_err"], "warn": p["warn"]}
         for i, v in pts:
             x, y = sx(i), sy(v)
-            self.create_oval(x - 3, y - 3, x + 3, y + 3, fill=p["line"], outline="")
+            kind = self._points[i][2] if len(self._points[i]) > 2 else None
+            fill = kind_fill.get(kind, p["line"])
+            self.create_oval(x - 3, y - 3, x + 3, y + 3, fill=fill, outline="")
+        # Ring-highlight the marked point (e.g. the measured capacity peak).
+        if self._mark is not None:
+            mv = dict(pts).get(self._mark)
+            if mv is not None:
+                x, y = sx(self._mark), sy(mv)
+                self.create_oval(x - 6, y - 6, x + 6, y + 6,
+                                 outline=p["live_ok"], width=2)
+                if self._mark_text:
+                    anchor = "sw" if x < (x0 + x1) / 2 else "se"
+                    self.create_text(x + (8 if anchor == "sw" else -8), y - 6,
+                                     anchor=anchor, text=self._mark_text,
+                                     fill=p["live_ok"], font=("TkDefaultFont", 8, "bold"))
         li, lv = pts[-1]
-        self.create_text(sx(li), sy(lv) - 9, text=f"{lv:.1f}", fill=p["txt"],
-                         font=("TkDefaultFont", 8, "bold"))
+        if li != self._mark:
+            self.create_text(sx(li), sy(lv) - 9, text=self._fmt_val(lv), fill=p["txt"],
+                             font=("TkDefaultFont", 8, "bold"))
         self.create_text(x0, y0 + 4, anchor="nw", text=self._points[pts[0][0]][0],
                          fill=p["sub"], font=("TkDefaultFont", 8))
         if len(pts) > 1:
@@ -1875,6 +1919,8 @@ class App:
             self.tab_capacity, text=self.L("Set the load and press ‘Run capacity test’."),
             anchor="w", justify="left", font=ctk.CTkFont(size=15, weight="bold"))
         self.capacity_readout.pack(fill="x", padx=16, pady=(2, 4))
+        # Default label colour, restored on each run before a verdict recolours it.
+        self._cap_readout_color = self.capacity_readout.cget("text_color")
 
         sec3, body = self._section(self.tab_capacity, "Live")
         sec3.pack(fill="both", expand=True, padx=12, pady=(0, 8))
@@ -1927,7 +1973,8 @@ class App:
         self.capacity_log.write(
             f"        ramp c={'→'.join(str(c) for c in ramp)} · in {cfg['ctx_tokens']} / "
             f"out {cfg['gen_tokens']} tok · {cfg['window_s']:g}s/step{tdesc}", "dim")
-        self.capacity_readout.configure(text="Starting capacity ramp…")
+        self.capacity_readout.configure(text="Starting capacity ramp…",
+                                        text_color=self._cap_readout_color)
 
         def on_progress(snap):
             self.post(lambda s=snap: self._capacity_progress(s))
@@ -1940,10 +1987,18 @@ class App:
             self._capacity_done, status="Capacity test running…")
 
     def _capacity_plot(self, steps: list):
-        if steps:
-            self.capacity_chart.plot(
-                [(f"c{s['conc']}", s["total_per_min"]) for s in steps],
-                title="total tok/min per concurrency level", unit="tok/min")
+        if not steps:
+            return
+        # Saturated levels red; ring the best healthy level as the peak.
+        healthy = [x for x in steps if x.get("healthy")]
+        peak = max(healthy, key=lambda x: x["total_per_min"]) if healthy else None
+        mark = steps.index(peak) if peak else None
+        self.capacity_chart.plot(
+            [(f"c{x['conc']}", x["total_per_min"],
+              None if x.get("healthy") else "err") for x in steps],
+            title="total tok/min vs concurrency  (red = past capacity)",
+            unit="tok/min", mark=mark,
+            mark_text=f"peak {ChartCanvas._fmt_val(peak['total_per_min'])}" if peak else "")
 
     def _capacity_progress(self, s: dict):
         phase = s.get("phase")
@@ -1959,7 +2014,7 @@ class App:
         cur = s.get("current")
         if cur:
             tag = "ok" if cur["healthy"] else "err"
-            flags = ""
+            flags = "" if cur["healthy"] else "  ⚠"
             if cur["rejected"]:
                 flags += f" · {cur['rejected']} rejected(429)"
             if cur["hard_err"]:
@@ -1967,16 +2022,12 @@ class App:
             if cur["undergen_frac"] >= 0.1:
                 flags += f" · under-gen {cur['undergen_frac'] * 100:.0f}%"
             self.capacity_log.write(
-                f"c={cur['conc']:>3}  {self._fmt_per_min(cur['total_per_min'])}  "
-                f"(out {self._fmt_per_min(cur['out_per_min'])} · p95 {cur['lat_p95']:.1f}s){flags}",
+                f"c={cur['conc']:>3}  {self._fmt_per_min(cur['total_per_min']):>12}  "
+                f"out {self._fmt_per_min(cur['out_per_min']):>12}  "
+                f"p95 {cur['lat_p95']:5.1f}s{flags}",
                 tag)
         self._capacity_plot(steps)
-        # Running peak = best HEALTHY step so far (matches the backend's final
-        # peak). Compute it from `steps` (which already includes the step that
-        # just finished) rather than the snapshot's `peak`, which is emitted a
-        # step behind and so would lag the readout by one level.
-        healthy = [x for x in steps if x.get("healthy")]
-        peak = max(healthy, key=lambda x: x["total_per_min"]) if healthy else None
+        peak = s.get("peak")
         if peak:
             self.capacity_readout.configure(
                 text=f"Peak so far: {self._fmt_per_min(peak['total_per_min'])} @ c={peak['conc']}   "
@@ -1985,6 +2036,7 @@ class App:
         self._set_status(s.get("status", "Capacity test running…"))
 
     def _capacity_done(self, s: dict):
+        GREEN, RED = ("#1c8a44", "#57c07a"), ("#b23b3b", "#e26d6d")
         self._capacity_plot(s.get("steps", []))
         peak_pm = s.get("peak_total_per_min", 0.0)
         self.capacity_log.write("✓ Capacity ramp complete", "ok")
@@ -1993,7 +2045,7 @@ class App:
             # so there is no sustainable capacity number to report.
             self.capacity_readout.configure(
                 text="NO SUSTAINABLE CAPACITY — the endpoint rejected or failed "
-                     "from the lowest concurrency level.")
+                     "from the lowest concurrency level.", text_color=RED)
             self.capacity_log.write(f"◆ {s.get('saturation', '')}", "err")
             if s.get("target_per_min"):
                 self.capacity_log.write(
@@ -2001,10 +2053,17 @@ class App:
                     f"no capacity could be sustained", "err")
             self._set_status("Capacity test complete — no sustainable capacity.")
             return
+        tgt = s.get("target_per_min") or 0.0
+        met = bool(s.get("target_met"))
+        tdesc = ""
+        if tgt > 0:
+            tdesc = (f"   ·   {'✅ target met' if met else '❌ below target'} "
+                     f"({self._fmt_per_min(tgt)})")
         self.capacity_readout.configure(
             text=f"CAPACITY  {self._fmt_per_min(peak_pm)}  @ c={s.get('peak_conc')}   "
                  f"(out {self._fmt_per_min(s.get('peak_out_per_min', 0))} · "
-                 f"in {self._fmt_per_min(s.get('peak_in_per_min', 0))})")
+                 f"in {self._fmt_per_min(s.get('peak_in_per_min', 0))}){tdesc}",
+            text_color=RED if (tgt > 0 and not met) else GREEN)
         rows = [
             ("peak total tok/min", f"{peak_pm:,.0f}"),
             ("peak output tok/min", f"{s.get('peak_out_per_min', 0):,.0f}"),
@@ -2019,9 +2078,7 @@ class App:
             "Token capacity",
             f"{self._fmt_per_min(peak_pm)} @ c={s.get('peak_conc')}", rows)
         self.capacity_log.write(f"◆ Saturation: {s.get('saturation', '')}", "dim")
-        tgt = s.get("target_per_min") or 0.0
         if tgt > 0:
-            met = bool(s.get("target_met"))
             self.capacity_log.write(
                 f"{'✅ PASS' if met else '❌ FAIL'} — target {self._fmt_per_min(tgt)}: "
                 f"measured peak {self._fmt_per_min(peak_pm)} "

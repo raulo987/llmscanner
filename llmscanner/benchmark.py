@@ -953,6 +953,10 @@ async def capacity_test(client: LLMClient, model: Optional[str], *,
         req_total = len(recs)
         rejected_frac = (rejected / req_total) if req_total else 0.0
         hard_err_frac = (hard_err / req_total) if req_total else 0.0
+        # Mean duration of ALL successful requests this step (also the ones that
+        # finished outside the window) — used to diagnose a too-short window.
+        ok_all = [x for x in recs if x[1]]
+        dur_mean = statistics.mean([x[5] for x in ok_all]) if ok_all else 0.0
         # A step is "healthy" (its rate is genuinely sustainable) only if the
         # server wasn't shedding load or truncating output to keep up.
         healthy = (len(ok) > 0 and rejected_frac < 0.05 and hard_err_frac < 0.02
@@ -969,6 +973,7 @@ async def capacity_test(client: LLMClient, model: Optional[str], *,
             "rejected_frac": rejected_frac, "hard_err_frac": hard_err_frac,
             "undergen_frac": undergen, "est_frac": est_frac,
             "gen_actual": (tout / len(ok)) if ok else 0.0,
+            "dur_mean": dur_mean,
             "healthy": healthy, "error_samples": errs_all[:3],
         }
 
@@ -986,9 +991,6 @@ async def capacity_test(client: LLMClient, model: Optional[str], *,
             await asyncio.sleep(settle_s)
         s = await run_step(conc)
         steps.append(s)
-        emit({"steps": steps, "current": s, "peak": peak, "phase": "step_done",
-              "status": f"c={conc}: {s['total_per_min']:,.0f} tok/min", "conc": conc,
-              "target_per_min": target_per_min})
 
         if not s["healthy"]:
             # Server is rejecting / erroring / truncating — we're past capacity.
@@ -998,22 +1000,35 @@ async def capacity_test(client: LLMClient, model: Optional[str], *,
             elif s["hard_err_frac"] >= 0.02:
                 saturation = (f"hard errors/timeouts at c={conc} "
                               f"({s['hard_err_frac'] * 100:.0f}%) — endpoint overloaded")
+            elif s["success"] == 0:
+                # Nothing finished inside the measurement window — the window is
+                # shorter than a single request, not a capacity problem.
+                dur = f" (a request takes ~{s['dur_mean']:.0f}s vs {window_s:g}s window)" \
+                      if s["dur_mean"] else ""
+                saturation = (f"no request finished inside the measurement window at "
+                              f"c={conc}{dur} — raise ‘Window / step’ above the request duration")
             else:
                 saturation = (f"output truncated at c={conc} "
                               f"(under-gen {s['undergen_frac'] * 100:.0f}%) — decode saturated")
-            break
-
-        if peak is None or s["total_per_min"] > peak["total_per_min"] * (1 + plateau_frac):
-            peak = s
-            plateau = 0
         else:
-            if s["total_per_min"] > (peak["total_per_min"] if peak else 0):
-                peak = s   # marginal gain still counts as the best number
-            plateau += 1
-            if plateau >= plateau_patience:
-                saturation = (f"throughput plateaued at c={conc} — adding concurrency "
-                              f"stopped raising tok/min (< {plateau_frac * 100:.0f}% gain)")
-                break
+            if peak is None or s["total_per_min"] > peak["total_per_min"] * (1 + plateau_frac):
+                peak = s
+                plateau = 0
+            else:
+                if s["total_per_min"] > peak["total_per_min"]:
+                    peak = s   # marginal gain still counts as the best number
+                plateau += 1
+                if plateau >= plateau_patience:
+                    saturation = (f"throughput plateaued at c={conc} — adding concurrency "
+                                  f"stopped raising tok/min (< {plateau_frac * 100:.0f}% gain)")
+
+        # Emit AFTER the peak/saturation update so the snapshot's `peak` is
+        # current (a step-behind peak would lag the live readout by one level).
+        emit({"steps": steps, "current": s, "peak": peak, "phase": "step_done",
+              "status": f"c={conc}: {s['total_per_min']:,.0f} tok/min", "conc": conc,
+              "target_per_min": target_per_min})
+        if saturation:
+            break
 
     if not saturation:
         last = ramp[-1] if ramp else 0

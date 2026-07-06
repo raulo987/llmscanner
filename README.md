@@ -363,9 +363,14 @@ Erinevus teistest tabidest:
 Kuidas töötab:
 
 - **Ramp:** concurrency käib astmeti **1 → 2 → 4 → 8 → … → Max concurrency**. Igal astmel hoiab test
-  selle arvu päringuid pidevalt õhus **"Window / step"** sekundit (vaikimisi 40 s).
+  selle arvu päringuid pidevalt õhus **"Window / step"** sekundit (vaikimisi 40 s). Vali aken
+  **päringu kestusest pikem** (vt latentsi p95 Benchmark-tabilt) — kui ükski päring akna sees valmis
+  ei jõua, ütleb test selgelt *"raise Window / step"*.
 - **Steady-state mõõtmine:** iga akna esimene ~kolmandik visatakse ära (järjekorra täitumine, külm
   KV-cache), ülejäänu pealt mõõdetakse **IN / OUT / TOTAL tokenit minutis**.
+- **Graafik:** küllastuskõver iga taseme kohta — **punased punktid** on üle võimsuse (saturatsioon),
+  **roheline rõngas** märgib mõõdetud tippu. Suur readout värvub tulemusega (roheline = võimsus
+  leitud / target täidetud, punane = ei).
 - **Saturatsiooni tuvastus** — ramp peatub varakult, kui:
   - läbilaskevõime **platoole jõuab** (concurrency lisamine ei tõsta enam tok/min, < 8% kasvu), **või**
   - server hakkab **tagasi lükkama** (429/503 — admission-limiit käes), **või**
@@ -373,7 +378,6 @@ Kuidas töötab:
 - **Tulemus:** **tipp-püsiv TOTAL tok/min** (= võimsus), **millisel concurrency'l** see saavutati, ja
   **miks** ramp peatus. Kui ramp jõuab max concurrency'ni ilma peatumata, öeldakse *"still climbing —
   tõsta Max concurrency"* (tegelik lagi on kõrgemal).
-- **Graafik:** tok/min iga concurrency-taseme kohta — näed **küllastuskõverat** ja põlve (knee).
 
 **Target tok/min (valikuline):** kui täidad nõutava võimsuse (nt lepingu TPM või tippkoormuse, mida pead
 teenindama), lisab tulemus **PASS/FAIL** verdikti — kas mõõdetud tipp-võimsus täidab selle. Tühjaks
