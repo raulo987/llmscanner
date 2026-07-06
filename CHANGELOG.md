@@ -6,7 +6,13 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
-### 2026-07-06 (uus Capacity-tab — tok/min lagi)
+### 2026-07-06 (Provider-fit tabi paigutus korda)
+- **Provider-fit väljade paigutus parandatud** — parem väljapaar (Output tokens / Requests per level /
+  Context probe) oli varem paisatud kaugele paremasse serva (osaliselt ekraanilt välja). Põhjus:
+  murdumatu intro-tekst paisutas grid'i ~1650px laiuseks ja ilma venitava veeruta hajusid väljad
+  laiali. Nüüd: intro **murdub** pane laiusele (ja resize'imisel dünaamiliselt), väljad on **kahes
+  joondatud veerus** (labelid paremjoondatud, ühtlane vahe) ja **venitav sabaveerg** hoiab väljad
+  vasakul kompaktselt. Neli kontroll-linnukest on koondatud "Kontrollid" alapealkirja alla.
 - **Uus "Capacity" tab (Soak ja Model-fit vahel)** — mõõdab endpoint'i **tipp-püsiva tokenit/minutis**
   ehk võimsuse **lae**. Erinevalt Soak-ist (fikseeritud concurrency → tok/tunnis) **tõstab Capacity
   concurrency't astmeliselt (1 → 2 → 4 → … → Max concurrency)**, hoiab igal astmel koormust

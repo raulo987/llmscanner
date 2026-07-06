@@ -92,7 +92,7 @@ TR_ET = {
     "Sweep concurrencies": "Sweep paralleelsused", "Throughput runs": "Läbilaskevõime jooksud",
     "TTFT p95 SLA (s)": "TTFT p95 SLA (s)",
     "Max concurrency": "Max paralleelsus", "Window / step (s)": "Aken / samm (s)",
-    "Target tok/min (optional)": "Siht tok/min (valikuline)",
+    "Target tok/min (optional)": "Siht tok/min (valikuline)", "Checks": "Kontrollid",
     # buttons
     "Detect server": "Tuvasta server", "List models": "Loetle mudelid", "Load": "Lae",
     "Save current…": "Salvesta praegune…", "Delete": "Kustuta",
@@ -2334,44 +2334,61 @@ class App:
                                  "Provider fit — OpenRouter / HuggingFace readiness")
         sec.pack(fill="x", padx=12, pady=(10, 6))
 
+        # Two aligned label/entry pairs per row, then a stretchy tail column that
+        # absorbs slack so the fields stay compact on the left (without it, the
+        # long intro inflates the grid and scatters the right-hand pair off-screen).
+        for col, ms in ((0, 150), (1, 140), (2, 30), (3, 150), (4, 140)):
+            top.grid_columnconfigure(col, minsize=ms)
+        top.grid_columnconfigure(5, weight=1)
+
         intro = ctk.CTkLabel(
-            top, anchor="w", justify="left", text_color=self.pal["sub"],
+            top, anchor="w", justify="left", text_color=self.pal["sub"], wraplength=760,
             text=("Checks the API contract routers require (streaming, usage accounting, "
                   "max_tokens/stop, deterministic decode, sampling params, clean errors), "
                   "then sweeps concurrency to find the throughput knee and the first "
                   "bottleneck. Verdict: SOBIB / PIIRIPEAL / EI SOBI per provider."))
-        intro.grid(row=0, column=0, columnspan=4, sticky="w", padx=12, pady=(4, 6))
+        intro.grid(row=0, column=0, columnspan=6, sticky="ew", padx=12, pady=(4, 8))
 
-        def field(r, c, label, var, info, w=110):
-            self._lbl(top, label, info).grid(row=r, column=c, sticky="e", padx=(12, 4), pady=5)
-            ctk.CTkEntry(top, textvariable=var, width=w).grid(row=r, column=c + 1, sticky="w", pady=5)
+        # Keep the intro wrapping to the actual pane width as the window resizes
+        # (guarded so setting wraplength doesn't loop on its own re-layout).
+        def _rewrap(e, lbl=intro):
+            want = max(320, e.width - 28)
+            if abs(lbl.cget("wraplength") - want) > 12:
+                lbl.configure(wraplength=want)
+        top.bind("<Configure>", _rewrap)
+
+        def field(r, pair, label, var, info, w=130):
+            col = 0 if pair == 0 else 3
+            self._lbl(top, label, info).grid(row=r, column=col, sticky="e", padx=(12, 6), pady=6)
+            ctk.CTkEntry(top, textvariable=var, width=w).grid(
+                row=r, column=col + 1, sticky="w", pady=6)
 
         field(1, 0, "Input tokens / req", self.var_rd_in, INFO["rd_in"])
-        field(1, 2, "Output tokens / req", self.var_rd_out, INFO["rd_out"])
-        field(2, 0, "Concurrency sweep", self.var_rd_sweep, INFO["rd_sweep"], w=150)
-        field(2, 2, "Requests / level", self.var_rd_reqs, INFO["rd_reqs"])
+        field(1, 1, "Output tokens / req", self.var_rd_out, INFO["rd_out"])
+        field(2, 0, "Concurrency sweep", self.var_rd_sweep, INFO["rd_sweep"], w=140)
+        field(2, 1, "Requests / level", self.var_rd_reqs, INFO["rd_reqs"])
         field(3, 0, "TTFT p95 SLA (s)", self.var_rd_sla, INFO["rd_sla"])
-        field(3, 2, "Context probe (tok)", self.var_rd_ctx, INFO["rd_ctx"])
-        fr0 = ctk.CTkFrame(top, fg_color="transparent")
-        fr0.grid(row=4, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
-        ctk.CTkCheckBox(fr0, text=self.L("Integrity probes — token-count honesty, context recall, model quality"),
-                        variable=self.var_rd_integrity).pack(side="left")
-        self._info_icon(fr0, "Integrity probes", INFO["rd_integrity"]).pack(side="left", padx=(5, 0))
-        fr = ctk.CTkFrame(top, fg_color="transparent")
-        fr.grid(row=5, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
-        ctk.CTkCheckBox(fr, text=self.L("Overload probe (+25%) — check clean admission control"),
-                        variable=self.var_rd_overload).pack(side="left")
-        self._info_icon(fr, "Overload probe", INFO["rd_overload"]).pack(side="left", padx=(5, 0))
-        fr2 = ctk.CTkFrame(top, fg_color="transparent")
-        fr2.grid(row=6, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
-        ctk.CTkCheckBox(fr2, text=self.L("Distinct request prefixes (spread across backends)"),
-                        variable=self.var_rd_distinct).pack(side="left")
-        self._info_icon(fr2, "Distinct request prefixes", INFO["rd_distinct"]).pack(side="left", padx=(5, 0))
-        fr3 = ctk.CTkFrame(top, fg_color="transparent")
-        fr3.grid(row=7, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
-        ctk.CTkCheckBox(fr3, text=self.L("Disable thinking during test (test the agentic mode)"),
-                        variable=self.var_rd_nothink).pack(side="left")
-        self._info_icon(fr3, "Disable thinking", INFO["rd_nothink"]).pack(side="left", padx=(5, 0))
+        field(3, 1, "Context probe (tok)", self.var_rd_ctx, INFO["rd_ctx"])
+
+        ctk.CTkLabel(top, text=self.L("Checks"), anchor="w", text_color=self.pal["sub"],
+                     font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=4, column=0, columnspan=6, sticky="w", padx=12, pady=(10, 2))
+
+        def check(r, pair, label, var, info, title):
+            col = 0 if pair == 0 else 3
+            fr = ctk.CTkFrame(top, fg_color="transparent")
+            fr.grid(row=r, column=col, columnspan=3, sticky="w", padx=12, pady=(2, 4))
+            ctk.CTkCheckBox(fr, text=self.L(label), variable=var).pack(side="left")
+            self._info_icon(fr, title, info).pack(side="left", padx=(5, 0))
+
+        check(5, 0, "Integrity probes — token-count honesty, context recall, model quality",
+              self.var_rd_integrity, INFO["rd_integrity"], "Integrity probes")
+        check(6, 0, "Overload probe (+25%) — check clean admission control",
+              self.var_rd_overload, INFO["rd_overload"], "Overload probe")
+        check(7, 0, "Distinct request prefixes (spread across backends)",
+              self.var_rd_distinct, INFO["rd_distinct"], "Distinct request prefixes")
+        check(8, 0, "Disable thinking during test (test the agentic mode)",
+              self.var_rd_nothink, INFO["rd_nothink"], "Disable thinking")
 
         runbar = ctk.CTkFrame(self.tab_ready, fg_color="transparent")
         runbar.pack(fill="x", padx=12, pady=4)
