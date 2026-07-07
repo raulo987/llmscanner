@@ -6,6 +6,19 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
+### 2026-07-07 (uus Capabilities-tab — funktsionaalsuse avastus)
+- **Uus "Capabilities" tab (Provider-fit järel)** — kaardistab, mis funktsionaalsust endpoint/mudel
+  pakub. Kolm rühma: **API-marsruudid** (`/v1/models`, chat, completions, **`/v1/embeddings`** koos
+  vektori dimensiooniga, `/v1/rerank`, `/tokenize`, `/v1/moderations`, images, audio speech/transcribe),
+  **chat-funktsioonid** (voogedastus, natiivne tööriista-kutse, JSON object/schema režiim, vision,
+  n>1, logprobs, stop-jadad, seed-korratavus, reasoning) ja **mudeli metaandmed** (konteksti pikkus,
+  hinnakiri, omanik). Iga rida = üks väike proov → ✓ supported / ✗ no / ~ present / — n/a.
+- Marsruudi-tuvastus: iga vastus peale 404 loeb marsruudi olemasolevaks, nii eristub "otspunkti pole"
+  tegelikust "otspunkt on, aga see mudel ei toeta" (nt embeddings üldmudelil).
+- Tulemused värvikoodiga puus (rühma-päised + ridade rohelin/punane/oranž), **Copy results** kopeerib
+  tab-eraldatud tabeli. Skann ei tekita koormust (~2 tosinat kiiret päringut).
+- Klient sai `probe_json(method, path, body)` madalataseme otspunkti-proovija; backend `capabilities_probe()`.
+
 ### 2026-07-06 (Provider-fit tabi paigutus korda)
 - **Provider-fit väljade paigutus parandatud** — parem väljapaar (Output tokens / Requests per level /
   Context probe) oli varem paisatud kaugele paremasse serva (osaliselt ekraanilt välja). Põhjus:

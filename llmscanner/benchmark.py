@@ -2088,3 +2088,315 @@ async def provider_readiness(client: LLMClient, model: Optional[str], *,
     report["verdicts"] = _readiness_verdicts(report)
     emit({"event": "done", "report": report})
     return report
+
+
+# ---------------------------------------------------------------------------
+# Capability discovery
+#
+# Probes what an endpoint/model actually offers: which API routes are served
+# (embeddings, rerank, tokenize, audio, images, …) and which chat features work
+# (streaming, tool-calling, JSON mode, vision, logprobs, seed, …). Each probe is
+# one small request and yields a row: supported ("yes") / not ("no") / present
+# but unverified ("maybe") / couldn't reach ("error") / not applicable ("na").
+# ---------------------------------------------------------------------------
+
+# A 1×1 transparent PNG, for the vision (image input) probe.
+_TINY_PNG = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAA"
+             "C1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+
+
+def _cap_row(name, status, detail=""):
+    return {"name": name, "status": status, "detail": detail}
+
+
+async def capabilities_probe(client: LLMClient, model: Optional[str], *,
+                             on_progress: Optional[Callable[[dict], None]] = None) -> dict:
+    """Discover which endpoints and chat features this server/model supports.
+
+    Sends a battery of small probes across three groups — API endpoints, chat
+    features, and model metadata — and returns a report with per-capability
+    status. Streams each row via `on_progress` ({"event":"item"|"group"|"done"})
+    so a UI can fill in live. Cancellable at any await.
+    """
+    if not model:
+        try:
+            models = await client.list_models()
+            model = models[0] if models else None
+        except Exception:
+            model = None
+        if not model:
+            raise RuntimeError("No model specified and model listing failed.")
+
+    emit = on_progress or (lambda *_: None)
+    groups: list[dict] = []
+
+    def start(group: str):
+        g = {"group": group, "items": []}
+        groups.append(g)
+        emit({"event": "group", "group": group})
+        return g
+
+    def add(g, row):
+        g["items"].append(row)
+        emit({"event": "item", "group": g["group"], "item": row})
+        return row
+
+    # ---- Group 1: API endpoints ---------------------------------------------
+    g_api = start("API endpoints")
+
+    # /v1/models — always the first thing a router calls.
+    raw = await client.list_models_raw()
+    add(g_api, _cap_row("Model listing (/v1/models)", "yes" if raw else "no",
+                        f"{len(raw)} model(s) advertised" if raw else "no /v1/models data"))
+
+    # Chat + text completion routes.
+    rc = await client.probe_json("POST", "/v1/chat/completions",
+                                 {"model": model, "messages": [{"role": "user", "content": "hi"}],
+                                  "max_tokens": 1, "stream": False})
+    add(g_api, _cap_row("Chat completions (/v1/chat/completions)",
+                        "yes" if rc["status"] == 200 else ("no" if not rc["present"] else "maybe"),
+                        _http_detail(rc)))
+    rt = await client.probe_json("POST", "/v1/completions",
+                                 {"model": model, "prompt": "hi", "max_tokens": 1, "stream": False})
+    add(g_api, _cap_row("Text completions (/v1/completions)",
+                        "yes" if rt["status"] == 200 else ("no" if not rt["present"] else "maybe"),
+                        _http_detail(rt)))
+
+    # Embeddings — the capability the user specifically wanted.
+    re_ = await client.probe_json("POST", "/v1/embeddings", {"model": model, "input": "hello world"})
+    emb = (re_["json"] or {}).get("data") if re_["status"] == 200 else None
+    if emb and isinstance(emb, list) and isinstance(emb[0], dict) and emb[0].get("embedding"):
+        dim = len(emb[0]["embedding"])
+        add(g_api, _cap_row("Embeddings (/v1/embeddings)", "yes", f"vector dim {dim}"))
+    elif not re_["present"]:
+        add(g_api, _cap_row("Embeddings (/v1/embeddings)", "no", "no /v1/embeddings route"))
+    else:
+        add(g_api, _cap_row("Embeddings (/v1/embeddings)", "no",
+                            f"route present, this model can't embed — {_http_detail(re_)}"))
+
+    # Reranking — /v1/rerank (vLLM/Infinity/Jina) or bare /rerank (TEI).
+    rr = await client.probe_json("POST", "/v1/rerank",
+                                 {"model": model, "query": "fruit",
+                                  "documents": ["an apple", "a car"]})
+    if not rr["present"]:
+        rr = await client.probe_json("POST", "/rerank",
+                                     {"model": model, "query": "fruit",
+                                      "documents": ["an apple", "a car"]})
+    rr_ok = rr["status"] == 200 and bool((rr["json"] or {}).get("results")
+                                         or (rr["json"] or {}).get("data"))
+    add(g_api, _cap_row("Reranking (/v1/rerank)",
+                        "yes" if rr_ok else ("no" if not rr["present"] else "maybe"),
+                        _http_detail(rr)))
+
+    # Tokenize — vLLM exposes /tokenize (no /v1 prefix).
+    tk = await client.probe_json("POST", "/tokenize", {"model": model, "prompt": "hello world"})
+    tk_ct = (tk["json"] or {}).get("count") if tk["status"] == 200 else None
+    if tk["status"] == 200 and (tk_ct is not None or (tk["json"] or {}).get("tokens")):
+        n = tk_ct if tk_ct is not None else len((tk["json"] or {}).get("tokens") or [])
+        add(g_api, _cap_row("Tokenize (/tokenize)", "yes", f"{n} tokens for a 2-word prompt"))
+    else:
+        add(g_api, _cap_row("Tokenize (/tokenize)", "no" if not tk["present"] else "maybe",
+                            _http_detail(tk)))
+
+    # Moderations / images / audio — route-presence probes (a non-404 response,
+    # even a validation error, means the route is served by this gateway).
+    for name, path, body in (
+        ("Moderations (/v1/moderations)", "/v1/moderations", {"model": model, "input": "hello"}),
+        ("Image generation (/v1/images/generations)", "/v1/images/generations",
+         {"model": model, "prompt": "a red cube", "n": 1}),
+        ("Text-to-speech (/v1/audio/speech)", "/v1/audio/speech",
+         {"model": model, "input": "hello", "voice": "alloy"}),
+        ("Speech-to-text (/v1/audio/transcriptions)", "/v1/audio/transcriptions", {}),
+    ):
+        rp = await client.probe_json("POST", path, body)
+        if rp["status"] == 200:
+            st = "yes"
+        elif rp["present"]:
+            st = "maybe"
+        else:
+            st = "no"
+        detail = ("route present" if st == "maybe" else _http_detail(rp))
+        add(g_api, _cap_row(name, st, detail))
+
+    # ---- Group 2: chat features ---------------------------------------------
+    g_feat = start("Chat features")
+    if client.endpoint == "completions":
+        add(g_feat, _cap_row("(chat features)", "na",
+                             "the active endpoint is /v1/completions — switch to chat to probe these"))
+    elif rc["status"] != 200:
+        add(g_feat, _cap_row("(chat features)", "na",
+                             "chat completions not available on this endpoint"))
+    else:
+        await _probe_chat_features(client, model, g_feat, add)
+
+    # ---- Group 3: model metadata --------------------------------------------
+    g_meta = start("Model metadata")
+    entry = None
+    for m in raw:
+        if m.get("id") == model:
+            entry = m
+            break
+    entry = entry or (raw[0] if raw else {})
+    ctx = None
+    for k in ("max_model_len", "max_context_length", "context_length",
+              "max_seq_len", "max_position_embeddings"):
+        if isinstance(entry.get(k), int) and entry[k] > 0:
+            ctx = entry[k]
+            break
+    add(g_meta, _cap_row("Advertised context length", "yes" if ctx else "no",
+                         f"{ctx:,} tokens" if ctx else "not exposed in /v1/models"))
+    pricing = entry.get("pricing")
+    add(g_meta, _cap_row("Pricing metadata", "yes" if pricing else "no",
+                         _pricing_detail(pricing) if pricing else "not exposed"))
+    owner = entry.get("owned_by") or entry.get("owner")
+    add(g_meta, _cap_row("Owner / provider", "yes" if owner else "no", str(owner) if owner else "—"))
+    add(g_meta, _cap_row("Models on server", "yes" if raw else "no",
+                         f"{len(raw)} model(s)" if raw else "—"))
+
+    supported = sum(1 for g in groups for it in g["items"] if it["status"] == "yes")
+    total = sum(1 for g in groups for it in g["items"] if it["status"] in ("yes", "no", "maybe"))
+    report = {"model": model, "endpoint": client.endpoint, "groups": groups,
+              "supported": supported, "total": total}
+    emit({"event": "done", "report": report})
+    return report
+
+
+def _http_detail(rp: dict) -> str:
+    """A compact human detail for a probe response."""
+    if rp["status"] == 200:
+        return "OK (200)"
+    if rp["status"] == 0:
+        return rp.get("error") or "no response"
+    msg = rp.get("error") or ""
+    msg = " ".join(msg.split())[:80]
+    return f"HTTP {rp['status']}" + (f" — {msg}" if msg else "")
+
+
+def _pricing_detail(pricing) -> str:
+    if isinstance(pricing, dict):
+        p = pricing.get("prompt") or pricing.get("input")
+        c = pricing.get("completion") or pricing.get("output")
+        if p is not None or c is not None:
+            return f"in {p} / out {c}"
+    return "present"
+
+
+async def _probe_chat_features(client: LLMClient, model: str, g, add) -> None:
+    """Probe the individual chat-completion features and add a row for each."""
+    # Streaming (SSE): a real token-by-token stream shows multiple chunks.
+    r = await client.generate(model=model, prompt="Count from 1 to 8.",
+                              max_tokens=16, retries=_PROBE_RETRIES)
+    if r.ok and r.stream_chunks >= 2:
+        add(g, _cap_row("Streaming (SSE)", "yes", f"{r.stream_chunks} streamed chunks"))
+    elif r.ok:
+        add(g, _cap_row("Streaming (SSE)", "maybe", "server buffered (1 chunk) — no token stream"))
+    else:
+        add(g, _cap_row("Streaming (SSE)", "error", r.error[:80]))
+
+    # Native tool / function calling.
+    rt = await client.generate(model=model, prompt="What's the weather in Tallinn? Use celsius.",
+                               max_tokens=128, temperature=0.0,
+                               tools=[_NATIVE_TOOL_SCHEMA], tool_choice="auto",
+                               retries=_PROBE_RETRIES)
+    if rt.ok and rt.tool_calls and rt.tool_calls[0][0] == "get_weather":
+        add(g, _cap_row("Tool / function calling (native)", "yes",
+                        f"called {rt.tool_calls[0][0]}(…)"))
+    elif not rt.ok:
+        add(g, _cap_row("Tool / function calling (native)", "no", _http_short(rt.error)))
+    elif rt.tool_calls:
+        add(g, _cap_row("Tool / function calling (native)", "maybe",
+                        f"called {rt.tool_calls[0][0]} (unexpected tool)"))
+    else:
+        add(g, _cap_row("Tool / function calling (native)", "no", "no tool_calls returned"))
+
+    # JSON object mode.
+    rj = await client.probe_json("POST", "/v1/chat/completions", {
+        "model": model, "max_tokens": 80, "temperature": 0.0,
+        "response_format": {"type": "json_object"},
+        "messages": [{"role": "user",
+                      "content": 'Return a JSON object: {"city":"Tallinn","country":"Estonia"}'}]})
+    add(g, _json_mode_row("JSON object mode (response_format)", rj))
+
+    # JSON schema mode (structured outputs).
+    schema = {"type": "object", "properties": {"city": {"type": "string"},
+              "population": {"type": "integer"}}, "required": ["city", "population"]}
+    rs = await client.probe_json("POST", "/v1/chat/completions", {
+        "model": model, "max_tokens": 80, "temperature": 0.0,
+        "response_format": {"type": "json_schema",
+                            "json_schema": {"name": "city_info", "schema": schema}},
+        "messages": [{"role": "user", "content": "Give city info for Tallinn."}]})
+    add(g, _json_mode_row("JSON schema mode (structured outputs)", rs))
+
+    # Vision (image input).
+    rv = await client.probe_json("POST", "/v1/chat/completions", {
+        "model": model, "max_tokens": 16, "temperature": 0.0,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "What colour is this pixel?"},
+            {"type": "image_url", "image_url": {"url": _TINY_PNG}}]}]})
+    if rv["status"] == 200:
+        add(g, _cap_row("Vision (image input)", "yes", "accepted an image message"))
+    elif not rv["present"]:
+        add(g, _cap_row("Vision (image input)", "no", "chat route not found"))
+    else:
+        add(g, _cap_row("Vision (image input)", "no", f"rejected — {_http_detail(rv)}"))
+
+    # Multiple choices (n > 1).
+    rn = await client.probe_json("POST", "/v1/chat/completions", {
+        "model": model, "max_tokens": 8, "temperature": 1.0, "n": 2,
+        "messages": [{"role": "user", "content": "Say a random word."}]})
+    nch = len((rn["json"] or {}).get("choices") or []) if rn["status"] == 200 else 0
+    add(g, _cap_row("Multiple choices (n>1)", "yes" if nch >= 2 else "no",
+                    f"returned {nch} choices" if rn["status"] == 200 else _http_detail(rn)))
+
+    # logprobs.
+    rl = await client.generate(model=model, prompt="Say: ok.", max_tokens=4,
+                               logprobs=True, retries=_PROBE_RETRIES)
+    add(g, _cap_row("Token logprobs", "yes" if rl.logprob_avg is not None else "no",
+                    f"avg logprob {rl.logprob_avg:.2f}" if rl.logprob_avg is not None
+                    else "no logprobs in response"))
+
+    # Stop sequences.
+    rstop = await client.generate(model=model, prompt="Recite the digits: 1 2 3 4 5 6 7 8 9",
+                                  max_tokens=40, temperature=0.0, stop=["5"],
+                                  retries=_PROBE_RETRIES)
+    if rstop.ok and rstop.finish_reason == "stop" and "6" not in (rstop.text or ""):
+        add(g, _cap_row("Stop sequences", "yes", "honoured the stop token"))
+    elif rstop.ok:
+        add(g, _cap_row("Stop sequences", "maybe", "accepted but not clearly honoured"))
+    else:
+        add(g, _cap_row("Stop sequences", "no", _http_short(rstop.error)))
+
+    # Reproducible sampling (seed): same seed at temperature>0 → identical output.
+    a = await client.generate(model=model, prompt="Write one random sentence.",
+                              max_tokens=24, temperature=1.0, seed=12345, retries=_PROBE_RETRIES)
+    b = await client.generate(model=model, prompt="Write one random sentence.",
+                              max_tokens=24, temperature=1.0, seed=12345)
+    if a.ok and b.ok and a.text and a.text == b.text:
+        add(g, _cap_row("Reproducible sampling (seed)", "yes", "identical output for a fixed seed"))
+    elif a.ok and b.ok:
+        add(g, _cap_row("Reproducible sampling (seed)", "no", "seed did not fix the output"))
+    else:
+        add(g, _cap_row("Reproducible sampling (seed)", "error", _http_short(a.error or b.error)))
+
+    # Reasoning / thinking model.
+    is_reasoning = await _detect_reasoning(client, model)
+    add(g, _cap_row("Reasoning / thinking output", "yes" if is_reasoning else "no",
+                    "emits chain-of-thought (reasoning model)" if is_reasoning
+                    else "standard model (no separate reasoning)"))
+
+
+def _http_short(err: str) -> str:
+    return " ".join((err or "").split())[:80] or "request failed"
+
+
+def _json_mode_row(name: str, rp: dict) -> dict:
+    """Judge a response_format probe: 200 + parseable JSON content → yes."""
+    if rp["status"] != 200:
+        return _cap_row(name, "no" if rp["present"] else "no", _http_detail(rp))
+    try:
+        content = (((rp["json"] or {}).get("choices") or [{}])[0]
+                   .get("message", {}).get("content") or "")
+        json.loads(content)
+        return _cap_row(name, "yes", "returned valid JSON")
+    except Exception:
+        return _cap_row(name, "maybe", "accepted but output wasn't strict JSON")

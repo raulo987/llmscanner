@@ -22,6 +22,20 @@ from .models import RequestResult
 from .util import Target, approx_tokens
 
 
+def _extract_error(obj) -> str:
+    """Pull a human error message out of an OpenAI-style error body, if present."""
+    if not isinstance(obj, dict):
+        return ""
+    err = obj.get("error")
+    if isinstance(err, dict):
+        return str(err.get("message") or err.get("type") or "")[:300]
+    if isinstance(err, str):
+        return err[:300]
+    if obj.get("message"):
+        return str(obj["message"])[:300]
+    return ""
+
+
 def _accumulate_tool_calls(raw_calls, acc: dict) -> None:
     """Merge one message's or one delta's `tool_calls` entries into `acc` (keyed by
     index — streaming splits a single call's `arguments` across many chunks)."""
@@ -142,6 +156,48 @@ class LLMClient:
                 if isinstance(v, int) and v > 0:
                     return v
         return None
+
+    async def probe_json(self, method: str, path: str, body: Optional[dict] = None,
+                         *, timeout: Optional[float] = None) -> dict:
+        """Low-level probe of an arbitrary endpoint (for capability detection).
+
+        Sends `method` (GET/POST) to `path` (joined onto base_url) and returns a
+        dict: {status, json, text, error, present}. `status` is the HTTP code (0
+        on a transport error); `json` is the parsed body or None; `present` is a
+        best-effort "does this route exist" — True for any HTTP response that
+        isn't 404 (a 400/422 validation error still means the route is handled),
+        False for 404 or a connection failure.
+        """
+        url = f"{self.base_url}{path}"
+        to = timeout if timeout is not None else min(self.timeout, 30.0)
+        try:
+            async with self._http(timeout=to) as c:
+                if method.upper() == "GET":
+                    r = await c.get(url, headers=self._headers())
+                else:
+                    r = await c.post(url, headers=self._headers(), json=body or {})
+        except Exception as e:
+            return {"status": 0, "json": None, "text": "",
+                    "error": f"{type(e).__name__}: {e}", "present": False}
+        obj = None
+        try:
+            obj = r.json()
+        except Exception:
+            pass
+        text = ""
+        if obj is None:
+            try:
+                text = r.text[:600]
+            except Exception:
+                text = ""
+        # A 404 (or an HTML "not found" body) means the route isn't served; any
+        # other status — including a 400/422 validation error — means it is.
+        present = r.status_code != 404
+        err = ""
+        if r.status_code >= 400:
+            err = _extract_error(obj) or text or f"HTTP {r.status_code}"
+        return {"status": r.status_code, "json": obj, "text": text,
+                "error": err, "present": present}
 
     def _payload(self, model, prompt, max_tokens, temperature, system, include_usage,
                  force_output=False, stop=None, top_p=None, seed=None, logprobs=False,

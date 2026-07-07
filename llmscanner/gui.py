@@ -61,6 +61,7 @@ TR_ET = {
     "Connection": "Ühendus", "Benchmark": "Jõudlus", "Optimum finder": "Optimeerija",
     "Soak": "Püsikoormus", "Capacity": "Võimsus",
     "Model fit": "Mudeli sobivus", "Provider fit": "Pakkuja sobivus",
+    "Capabilities": "Võimekused",
     "Network scan": "Võrguskann", "History": "Ajalugu",
     # section titles
     "Saved hosts (quick-select)": "Salvestatud hostid (kiirvalik)",
@@ -69,6 +70,8 @@ TR_ET = {
     "Measured operating points": "Mõõdetud tööpunktid",
     "Sustained throughput (tokens / hour)": "Püsiv läbilaskevõime (tokenit / tunnis)",
     "Token capacity (peak tokens / minute)": "Token-võimsus (tipp tokenit / minutis)",
+    "Capabilities — what this endpoint/model offers":
+        "Võimekused — mida see endpoint/mudel pakub",
     "Live": "Reaalajas",
     "Model fit — Openclaw / Hermes suitability": "Mudeli sobivus — Openclaw / Hermes",
     "Provider fit — OpenRouter / HuggingFace readiness":
@@ -98,6 +101,7 @@ TR_ET = {
     "Save current…": "Salvesta praegune…", "Delete": "Kustuta",
     "Run benchmark": "Käivita benchmark", "Find optima": "Leia optimum",
     "Run soak test": "Käivita soak-test", "Run capacity test": "Käivita võimsus-test",
+    "Run capability scan": "Käivita võimekuse-skann",
     "Run model-fit test": "Käivita model-fit test",
     "Run provider-fit test": "Käivita provider-fit test", "Scan network": "Skanni võrku",
     "Stop": "Peata", "Cancel": "Tühista", "Clear": "Tühjenda", "Clear all": "Tühjenda kõik",
@@ -122,6 +126,8 @@ TR_ET = {
         "Ülekoormuse proovik (+25%) — kontrolli puhast admission control'i",
     "Set the load and press ‘Run soak test’.": "Sea koormus ja vajuta ‘Käivita soak-test’.",
     "Set the load and press ‘Run capacity test’.": "Sea koormus ja vajuta ‘Käivita võimsus-test’.",
+    "Press ‘Run capability scan’ to inventory this endpoint.":
+        "Vajuta ‘Käivita võimekuse-skann’, et see endpoint kaardistada.",
     "Pick the checks and press ‘Run model-fit test’.":
         "Vali kontrollid ja vajuta ‘Käivita model-fit test’.",
     "Set the traffic shape and press ‘Run provider-fit test’.":
@@ -1094,6 +1100,7 @@ class App:
         self.tab_capacity = self.tabview.add(self.L("Capacity"))
         self.tab_fit = self.tabview.add(self.L("Model fit"))
         self.tab_ready = self.tabview.add(self.L("Provider fit"))
+        self.tab_caps = self.tabview.add(self.L("Capabilities"))
         self.tab_scan = self.tabview.add(self.L("Network scan"))
         self.tab_history = self.tabview.add(self.L("History"))
 
@@ -1104,6 +1111,7 @@ class App:
         self._build_capacity_tab()
         self._build_modelfit_tab()
         self._build_readiness_tab()
+        self._build_capabilities_tab()
         self._build_scan_tab()
         self._build_history_tab()
         self._style_trees()
@@ -2643,6 +2651,125 @@ class App:
         self._set_status("Copied the provider-fit report to the clipboard.")
         self.ready_log.write("📋 Copied full report to clipboard", "ok")
 
+    # ------------------------------------------------------- Capabilities tab
+    _CAP_SYM = {"yes": "✓ supported", "no": "✗ no", "maybe": "~ present",
+                "error": "⚠ error", "na": "— n/a"}
+
+    def _build_capabilities_tab(self):
+        sec, top = self._section(self.tab_caps, "Capabilities — what this endpoint/model offers")
+        sec.pack(fill="x", padx=12, pady=(10, 6))
+        intro = ctk.CTkLabel(
+            top, anchor="w", justify="left", text_color=self.pal["sub"], wraplength=760,
+            text=("Discovers which API routes the server serves (embeddings, rerank, tokenize, "
+                  "audio, images, …) and which chat features the model supports (streaming, "
+                  "tool-calling, JSON mode, vision, logprobs, seed, reasoning). Each row is one "
+                  "small probe against the current Host / Model."))
+        intro.pack(fill="x", padx=12, pady=(4, 8))
+
+        def _rewrap(e, lbl=intro):
+            want = max(320, e.width - 28)
+            if abs(lbl.cget("wraplength") - want) > 12:
+                lbl.configure(wraplength=want)
+        top.bind("<Configure>", _rewrap)
+
+        runbar = ctk.CTkFrame(self.tab_caps, fg_color="transparent")
+        runbar.pack(fill="x", padx=12, pady=4)
+        self.btn_caps = ctk.CTkButton(runbar, text=self.L("Run capability scan"),
+                                      command=self.on_run_capabilities)
+        self.btn_caps.pack(side="left")
+        btn_caps_cancel = ctk.CTkButton(runbar, text=self.L("Stop"), width=80, state="disabled",
+                                        fg_color="#b04a4a", hover_color="#963c3c",
+                                        command=self.cancel_current)
+        btn_caps_cancel.pack(side="left", padx=8)
+        self._cancel_btns.append(btn_caps_cancel)
+        ctk.CTkButton(runbar, text=self.L("Copy results"), width=110,
+                      command=self.copy_capabilities_results).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(runbar, text="A couple dozen quick probes — no load generated.",
+                     text_color=self.pal["sub"]).pack(side="left", padx=10)
+
+        self.caps_readout = ctk.CTkLabel(
+            self.tab_caps, text=self.L("Press ‘Run capability scan’ to inventory this endpoint."),
+            anchor="w", justify="left", font=ctk.CTkFont(size=15, weight="bold"))
+        self.caps_readout.pack(fill="x", padx=16, pady=(2, 4))
+
+        sec3, body = self._section(self.tab_caps, "Capabilities")
+        sec3.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        cols = ("feature", "status", "detail")
+        wrap, self.caps_tree = self._tree_with_scrollbars(body, cols, height=16)
+        for c, w, txt, stretch in (("feature", 320, "Capability", False),
+                                   ("status", 130, "Support", False),
+                                   ("detail", 520, "Details", True)):
+            self.caps_tree.heading(c, text=txt)
+            self.caps_tree.column(c, width=w, anchor="w", stretch=stretch)
+        self.caps_tree.tag_configure("cat", background=self.pal["head_bg"],
+                                     foreground=self.pal["head_fg"])
+        self.caps_tree.tag_configure("yes", foreground=self.pal["live_ok"])
+        self.caps_tree.tag_configure("no", foreground=self.pal["sub"])
+        self.caps_tree.tag_configure("maybe", foreground=self.pal["warn"])
+        self.caps_tree.tag_configure("error", foreground=self.pal["live_err"])
+        self.caps_tree.tag_configure("na", foreground=self.pal["sub"])
+        wrap.pack(fill="both", expand=True)
+
+    def on_run_capabilities(self):
+        try:
+            target = resolve_target(self.var_host.get(), self.var_port.get())
+        except ValueError as e:
+            return self._error(ValueError(f"Invalid host/port: {e}"))
+        client = LLMClient.from_target(
+            target, api_key=self.var_apikey.get().strip() or "EMPTY",
+            timeout=float(self.var_timeout.get() or 95), endpoint=self.var_endpoint.get())
+        self._remember_endpoint(target.host, target.port)
+        self.caps_tree.delete(*self.caps_tree.get_children())
+        self._caps_report = None
+        self.caps_readout.configure(text=f"Scanning {client.base_url} …",
+                                    text_color=self.caps_readout.cget("text_color"))
+
+        def on_progress(evt):
+            self.post(lambda e=evt: self._capabilities_progress(e))
+
+        self.run_async(
+            B.capabilities_probe(client, self._resolved_model(), on_progress=on_progress),
+            self._capabilities_done, status="Capability scan running…")
+
+    def _capabilities_progress(self, evt: dict):
+        kind = evt.get("event")
+        if kind == "group":
+            self.caps_tree.insert("", "end", values=(f"▸ {evt['group']}", "", ""), tags=("cat",))
+        elif kind == "item":
+            it = evt["item"]
+            self.caps_tree.insert(
+                "", "end", tags=(it["status"],),
+                values=(f"    {it['name']}", self._CAP_SYM.get(it["status"], it["status"]),
+                        it.get("detail", "")))
+            self.caps_tree.see(self.caps_tree.get_children()[-1])
+
+    def _capabilities_done(self, report: dict):
+        self._caps_report = report
+        n, tot = report.get("supported", 0), report.get("total", 0)
+        GREEN = ("#1c8a44", "#57c07a")
+        self.caps_readout.configure(
+            text=f"{n} / {tot} capabilities supported   ·   model {report.get('model', '?')}",
+            text_color=GREEN)
+        self._set_status(f"Capability scan complete — {n}/{tot} supported.")
+
+    def copy_capabilities_results(self):
+        rep = getattr(self, "_caps_report", None)
+        if not rep:
+            messagebox.showinfo(APP_TITLE, "No capability scan to copy yet — run one first.")
+            return
+        lines = [f"Capabilities — {rep.get('model', '?')} "
+                 f"({rep.get('supported', 0)}/{rep.get('total', 0)} supported)", ""]
+        for g in rep.get("groups", []):
+            lines.append(f"== {g['group']} ==")
+            for it in g["items"]:
+                lines.append(f"  {self._CAP_SYM.get(it['status'], it['status'])}\t"
+                             f"{it['name']}\t{it.get('detail', '')}")
+            lines.append("")
+        text = "\n".join(lines).rstrip()
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self._set_status("Copied capabilities to the clipboard.")
+
     def _build_scan_tab(self):
         sec, top = self._section(self.tab_scan, "Scan settings")
         sec.pack(fill="x", padx=12, pady=10)
@@ -3114,7 +3241,7 @@ class App:
             "Optimum finder": self.on_run_optima, "Soak": self.on_run_soak,
             "Capacity": self.on_run_capacity,
             "Model fit": self.on_run_modelfit, "Provider fit": self.on_run_readiness,
-            "Network scan": self.on_scan,
+            "Capabilities": self.on_run_capabilities, "Network scan": self.on_scan,
         }
         try:
             current = self.tabview.get()
@@ -3160,7 +3287,8 @@ class App:
         self._busy = busy
         state = "disabled" if busy else "normal"
         for name in ("btn_detect", "btn_models", "btn_run", "btn_scan",
-                     "btn_opt", "btn_soak", "btn_capacity", "btn_fit", "btn_ready"):
+                     "btn_opt", "btn_soak", "btn_capacity", "btn_fit", "btn_ready",
+                     "btn_caps"):
             b = getattr(self, name, None)
             if b is not None:
                 b.configure(state=state)

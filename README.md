@@ -39,6 +39,10 @@ rasket Qt-installi) ja lisaks boonusena käsurea-liides skriptimiseks.
   determinism, sampling-parameetrid, puhtad veakoodid) + paralleelsuse sweep, mis leiab
   läbilaskevõime **põlve ja esimese pudelikaela** (prefill/järjekord, dekodeerimine, batching, admission
   control). Verdikt SOBIB / PIIRIPEAL / EI SOBI kummalegi pakkujale. Vt [Provider fit](#provider-fit-openrouter--huggingface).
+- 🧩 **Capabilities** – eraldi tab, mis **avastab, mis funktsionaalsust endpoint/mudel pakub**:
+  API-marsruudid (**embeddings**, rerank, tokenize, moderations, audio, images) ja chat-funktsioonid
+  (voogedastus, tööriista-kutsed, JSON-režiim, vision, logprobs, seed, reasoning). Iga rida =
+  üks kiire proov → ✓ / ✗ / ~ / n/a. Vt [Capabilities](#capabilities-mida-endpoint-pakub).
 - 📊 **Testid** (Benchmark-tab):
   - **Kiirus** – latentsus (TTFT, aeg esimese tokenini) + läbilaskevõime (dekodeerimise tokenit/s).
   - **Koormustest** – N paralleelset päringut; agregeeritud tok/s ja p50/p95 latentsus.
@@ -537,6 +541,31 @@ mugav tulemuse jagamiseks.
 > kvantimise-fingerprint** nõuaks referents-logprobe iga mudeli kohta (meil on ainult enesekindluse
 > proxy). Need jäävad teadlikult katmata.
 
+## Capabilities (mida endpoint pakub)
+
+**Capabilities**-tab **kaardistab, mis funktsionaalsust see server/mudel tegelikult pakub** — kasulik,
+kui on vaja kiiresti teada, kas endpoint toetab nt **embedding'uid**, rerank'i või vision'it, ilma
+dokumentatsiooni kaevamata. Iga rida on **üks väike proov** praeguse Host / Model vastu, tulemusega
+✓ *supported* / ✗ *no* / ~ *present* (marsruut olemas, aga sel mudelil ei tööta) / — *n/a*.
+
+Kolm rühma:
+
+- **API-marsruudid** — kas server teenindab neid otspunkte:
+  - `/v1/models` (mudelite loend), `/v1/chat/completions`, `/v1/completions`
+  - **`/v1/embeddings`** — kui töötab, näidatakse **vektori dimensioon**
+  - `/v1/rerank` (või `/rerank`), `/tokenize` (vLLM), `/v1/moderations`
+  - `/v1/images/generations`, `/v1/audio/speech` (TTS), `/v1/audio/transcriptions` (STT)
+  - *Marsruudi-tuvastus:* iga vastus peale 404 (ka 400/422 valideerimisviga) tähendab, et otspunkt on
+    olemas — nii eristub "otspunkti pole" tegelikust "otspunkt on, aga see mudel ei sobi".
+- **Chat-funktsioonid** (kui chat-otspunkt töötab):
+  - **Voogedastus (SSE)**, **natiivne tööriista-kutse**, **JSON object mode** ja **JSON schema mode**
+    (structured outputs), **vision** (pildi-sisend), **mitu vastust (n>1)**, **logprobs**,
+    **stop-jadad**, **korratav sämplimine (seed)**, **reasoning/thinking** väljund.
+- **Mudeli metaandmed** — `/v1/models` kirjest: konteksti pikkus, hinnakiri, omanik, mudelite arv.
+
+Skann teeb ~kaks tosinat kiiret päringut ja **ei tekita koormust**. Tulemuse saab **Copy results**
+nupuga tab-eraldatud tabelina lõikelauale.
+
 ## Eelseaded, võrdlus ja raportid
 
 ### Koormuse eelseaded
@@ -597,12 +626,12 @@ skannimine võib olla seadusevastane.
 
 ```
 llmscanner/
-├── gui.py        # Tkinter GUI (peamine) — Connection / Benchmark / Optimum finder / Soak / Capacity / Model fit / Provider fit / Scan / History
+├── gui.py        # Tkinter GUI (peamine) — Connection / Benchmark / Optimum finder / Soak / Capacity / Model fit / Provider fit / Capabilities / Scan / History
 ├── cli.py        # käsurea-liides (boonus, vajab rich)
 ├── client.py     # OpenAI-ühilduv async klient (http/https, base_path) + ajamõõtmine
 ├── detect.py     # serveri tuvastus / fingerprint + smart_detect (kandidaatide proovimine)
 ├── scanner.py    # võrguskann + portide tuvastus
-├── benchmark.py  # latentsus / koormus / kontekst / sanity / sweep + find_optima + soak_test + capacity_test + suitability_test (model fit) + provider_readiness
+├── benchmark.py  # latentsus / koormus / kontekst / sanity / sweep + find_optima + soak_test + capacity_test + suitability_test (model fit) + provider_readiness + capabilities_probe
 ├── store.py      # SQLite püsivus: salvestatud hostid + kõik tulemused
 ├── icon.py       # rakenduse ikooni (sinine V) genereerimine
 ├── assets/
