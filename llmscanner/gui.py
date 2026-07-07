@@ -62,6 +62,7 @@ TR_ET = {
     "Soak": "Püsikoormus", "Capacity": "Võimsus",
     "Model fit": "Mudeli sobivus", "Provider fit": "Pakkuja sobivus",
     "Capabilities": "Võimekused", "Embed speed": "Embed-kiirus",
+    "Embed quality": "Embed-kvaliteet",
     "Network scan": "Võrguskann", "History": "Ajalugu",
     # section titles
     "Saved hosts (quick-select)": "Salvestatud hostid (kiirvalik)",
@@ -73,6 +74,7 @@ TR_ET = {
     "Capabilities — what this endpoint/model offers":
         "Võimekused — mida see endpoint/mudel pakub",
     "Embedding speed (throughput & latency)": "Embeddingu kiirus (läbilaskevõime & latents)",
+    "Embedding quality (does it actually work?)": "Embeddingu kvaliteet (kas päriselt töötab?)",
     "Live": "Reaalajas",
     "Model fit — Openclaw / Hermes suitability": "Mudeli sobivus — Openclaw / Hermes",
     "Provider fit — OpenRouter / HuggingFace readiness":
@@ -104,6 +106,7 @@ TR_ET = {
     "Run soak test": "Käivita soak-test", "Run capacity test": "Käivita võimsus-test",
     "Run capability scan": "Käivita võimekuse-skann",
     "Run embed speed test": "Käivita embed-kiiruse test",
+    "Run embed quality test": "Käivita embed-kvaliteedi test",
     "Run model-fit test": "Käivita model-fit test",
     "Run provider-fit test": "Käivita provider-fit test", "Scan network": "Skanni võrku",
     "Stop": "Peata", "Cancel": "Tühista", "Clear": "Tühjenda", "Clear all": "Tühjenda kõik",
@@ -132,6 +135,8 @@ TR_ET = {
         "Vajuta ‘Käivita võimekuse-skann’, et see endpoint kaardistada.",
     "Pick an embedding model and press ‘Run embed speed test’.":
         "Vali embedding-mudel ja vajuta ‘Käivita embed-kiiruse test’.",
+    "Pick an embedding model and press ‘Run embed quality test’.":
+        "Vali embedding-mudel ja vajuta ‘Käivita embed-kvaliteedi test’.",
     "Pick the checks and press ‘Run model-fit test’.":
         "Vali kontrollid ja vajuta ‘Käivita model-fit test’.",
     "Set the traffic shape and press ‘Run provider-fit test’.":
@@ -1129,6 +1134,7 @@ class App:
         self.tab_ready = self.tabview.add(self.L("Provider fit"))
         self.tab_caps = self.tabview.add(self.L("Capabilities"))
         self.tab_embed = self.tabview.add(self.L("Embed speed"))
+        self.tab_embq = self.tabview.add(self.L("Embed quality"))
         self.tab_scan = self.tabview.add(self.L("Network scan"))
         self.tab_history = self.tabview.add(self.L("History"))
 
@@ -1141,6 +1147,7 @@ class App:
         self._build_readiness_tab()
         self._build_capabilities_tab()
         self._build_embed_tab()
+        self._build_embed_quality_tab()
         self._build_scan_tab()
         self._build_history_tab()
         self._style_trees()
@@ -2944,6 +2951,138 @@ class App:
             self.embed_log.write(f"   error: {e[:80]}", "err")
         self._set_status("Embed speed test complete.")
 
+    # ------------------------------------------------------ Embed quality tab
+    def _build_embed_quality_tab(self):
+        self.var_embq_model = tk.StringVar(value="")
+        sec, top = self._section(self.tab_embq, "Embedding quality (does it actually work?)")
+        sec.pack(fill="x", padx=12, pady=(10, 6))
+        intro = ctk.CTkLabel(
+            top, anchor="w", justify="left", text_color=self.pal["sub"], wraplength=760,
+            text=("Checks embedding QUALITY, not speed: retrieval ranking, paraphrase vs unrelated "
+                  "similarity, Estonian↔English cross-lingual alignment, vector properties "
+                  "(L2-normalised, deterministic, dimension), input/batch limits, and — if the "
+                  "server serves /v1/rerank — reranker relevance."))
+        intro.pack(fill="x", padx=12, pady=(4, 6))
+
+        def _rewrap(e, lbl=intro):
+            want = max(320, e.width - 28)
+            if abs(lbl.cget("wraplength") - want) > 12:
+                lbl.configure(wraplength=want)
+        top.bind("<Configure>", _rewrap)
+
+        row = ctk.CTkFrame(top, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(0, 4))
+        self._lbl(row, "Embedding model", INFO["emb_model"]).pack(side="left", padx=(0, 6))
+        ctk.CTkEntry(row, textvariable=self.var_embq_model, width=320,
+                     placeholder_text="(uses the model selected at the top)").pack(side="left")
+
+        runbar = ctk.CTkFrame(self.tab_embq, fg_color="transparent")
+        runbar.pack(fill="x", padx=12, pady=4)
+        self.btn_embq = ctk.CTkButton(runbar, text=self.L("Run embed quality test"),
+                                      command=self.on_run_embed_quality)
+        self.btn_embq.pack(side="left")
+        btn_embq_cancel = ctk.CTkButton(runbar, text=self.L("Stop"), width=80, state="disabled",
+                                        fg_color="#b04a4a", hover_color="#963c3c",
+                                        command=self.cancel_current)
+        btn_embq_cancel.pack(side="left", padx=8)
+        self._cancel_btns.append(btn_embq_cancel)
+        ctk.CTkButton(runbar, text=self.L("Copy results"), width=110,
+                      command=self.copy_embq_results).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(runbar, text="~20 quick probes — no load generated.",
+                     text_color=self.pal["sub"]).pack(side="left", padx=10)
+
+        self.embq_readout = ctk.CTkLabel(
+            self.tab_embq, text=self.L("Pick an embedding model and press ‘Run embed quality test’."),
+            anchor="w", justify="left", font=ctk.CTkFont(size=15, weight="bold"))
+        self.embq_readout.pack(fill="x", padx=16, pady=(2, 4))
+        self._embq_default_color = self.embq_readout.cget("text_color")
+
+        sec3, body = self._section(self.tab_embq, "Checks")
+        sec3.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        cols = ("feature", "status", "detail")
+        wrap, self.embq_tree = self._tree_with_scrollbars(body, cols, height=15)
+        for c, w, txt, stretch in (("feature", 300, "Check", False),
+                                   ("status", 120, "Result", False),
+                                   ("detail", 540, "Details", True)):
+            self.embq_tree.heading(c, text=txt)
+            self.embq_tree.column(c, width=w, anchor="w", stretch=stretch)
+        self.embq_tree.tag_configure("cat", background=self.pal["head_bg"],
+                                     foreground=self.pal["head_fg"])
+        self.embq_tree.tag_configure("yes", foreground=self.pal["live_ok"])
+        self.embq_tree.tag_configure("no", foreground=self.pal["live_err"])
+        self.embq_tree.tag_configure("maybe", foreground=self.pal["warn"])
+        self.embq_tree.tag_configure("error", foreground=self.pal["live_err"])
+        self.embq_tree.tag_configure("na", foreground=self.pal["sub"])
+        wrap.pack(fill="both", expand=True)
+
+    _EMBQ_SYM = {"yes": "✓ pass", "no": "✗ fail", "maybe": "~ weak",
+                 "error": "⚠ error", "na": "— n/a"}
+
+    def on_run_embed_quality(self):
+        try:
+            target = resolve_target(self.var_host.get(), self.var_port.get())
+        except ValueError as e:
+            return self._error(ValueError(f"Invalid host/port: {e}"))
+        model = self.var_embq_model.get().strip() or self._resolved_model()
+        if not model:
+            return self._error(ValueError("No embedding model — enter one or select a model at the top."))
+        client = LLMClient.from_target(
+            target, api_key=self.var_apikey.get().strip() or "EMPTY",
+            timeout=float(self.var_timeout.get() or 95), endpoint=self.var_endpoint.get())
+        self._remember_endpoint(target.host, target.port)
+        self.embq_tree.delete(*self.embq_tree.get_children())
+        self._embq_report = None
+        self.embq_readout.configure(text=f"Preflight embed for {model} …",
+                                    text_color=self._embq_default_color)
+
+        def on_progress(evt):
+            self.post(lambda e=evt: self._embq_progress(e))
+
+        self.run_async(
+            B.embed_quality_test(client, model, on_progress=on_progress),
+            self._embq_done, status="Embed quality test running…")
+
+    def _embq_progress(self, evt: dict):
+        kind = evt.get("event")
+        if kind == "status":
+            self._set_status(evt.get("text", "Embed quality test running…"))
+        elif kind == "group":
+            self.embq_tree.insert("", "end", values=(f"▸ {evt['group']}", "", ""), tags=("cat",))
+        elif kind == "item":
+            it = evt["item"]
+            self.embq_tree.insert(
+                "", "end", tags=(it["status"],),
+                values=(f"    {it['name']}", self._EMBQ_SYM.get(it["status"], it["status"]),
+                        it.get("detail", "")))
+            self.embq_tree.see(self.embq_tree.get_children()[-1])
+
+    def _embq_done(self, report: dict):
+        self._embq_report = report
+        n, tot = report.get("supported", 0), report.get("total", 0)
+        GREEN, RED = ("#1c8a44", "#57c07a"), ("#b23b3b", "#e26d6d")
+        self.embq_readout.configure(
+            text=f"{n} / {tot} checks passed   ·   model {report.get('model', '?')} "
+                 f"(dim {report.get('dim', '?')})",
+            text_color=GREEN if n == tot else (RED if n <= tot // 2 else self._embq_default_color))
+        self._set_status(f"Embed quality test complete — {n}/{tot} passed.")
+
+    def copy_embq_results(self):
+        rep = getattr(self, "_embq_report", None)
+        if not rep:
+            messagebox.showinfo(APP_TITLE, "No embed quality report to copy yet — run one first.")
+            return
+        lines = [f"Embedding quality — {rep.get('model', '?')} (dim {rep.get('dim', '?')}) "
+                 f"— {rep.get('supported', 0)}/{rep.get('total', 0)} passed", ""]
+        for g in rep.get("groups", []):
+            lines.append(f"== {g['group']} ==")
+            for it in g["items"]:
+                lines.append(f"  {self._EMBQ_SYM.get(it['status'], it['status'])}\t"
+                             f"{it['name']}\t{it.get('detail', '')}")
+            lines.append("")
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(lines).rstrip())
+        self._set_status("Copied embed quality results to the clipboard.")
+
     def _build_scan_tab(self):
         sec, top = self._section(self.tab_scan, "Scan settings")
         sec.pack(fill="x", padx=12, pady=10)
@@ -3417,7 +3556,7 @@ class App:
             "Capacity": self.on_run_capacity,
             "Model fit": self.on_run_modelfit, "Provider fit": self.on_run_readiness,
             "Capabilities": self.on_run_capabilities, "Embed speed": self.on_run_embed,
-            "Network scan": self.on_scan,
+            "Embed quality": self.on_run_embed_quality, "Network scan": self.on_scan,
         }
         try:
             current = self.tabview.get()
@@ -3464,7 +3603,7 @@ class App:
         state = "disabled" if busy else "normal"
         for name in ("btn_detect", "btn_models", "btn_run", "btn_scan",
                      "btn_opt", "btn_soak", "btn_capacity", "btn_fit", "btn_ready",
-                     "btn_caps", "btn_embed"):
+                     "btn_caps", "btn_embed", "btn_embq"):
             b = getattr(self, name, None)
             if b is not None:
                 b.configure(state=state)

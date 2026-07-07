@@ -6,6 +6,19 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
+### 2026-07-07 (uus Embed quality -tab — kas embeddingud töötavad)
+- **Uus "Embed quality" tab (Embed speed järel)** — kontrollib embeddingute **kvaliteeti, mitte kiirust**.
+  Neli rühma pass/fail-ridadega + mõõdetud numbrid:
+  - **Retrieval & sarnasus:** retrieval-järjestus (õige dokument saab kõrgeima cosine-sim'i),
+    parafraas-vs-mitteseotud sim, **eesti↔inglise cross-lingual** joondus.
+  - **Vektori omadused:** L2-normaliseeritus (‖v‖≈1), determinism (sama tekst → identne vektor), dimensioon.
+  - **Piirid:** max sisend-pikkus (kärpimise/vea punkt) ja max batch-suurus.
+  - **Rerank** (kui `/v1/rerank` olemas): relevantsus — kas reranker paneb õige dokumendi esimeseks;
+    kui embedding-mudel pole reranker, otsitakse automaatselt rerank-nimelist mudelit.
+- Preflight embed + selge veateade chat-mudeli valimisel. Copy results kopeerib tab-eraldatud tabeli.
+- Klient: `embed(..., keep_vectors=True)` tagastab ka vektorid; backend `embed_quality_test()` +
+  cosine/rerank-abifunktsioonid.
+
 ### 2026-07-07 (uus Embed speed -tab — embedding-mudeli jõudlus)
 - **Uus "Embed speed" tab (Capabilities järel)** — mõõdab embedding-mudeli **läbilaskevõimet ja
   kiirust**: hoiab `concurrency` batch-päringut (igas `batch_size` teksti ~`input_tokens` tokenit)

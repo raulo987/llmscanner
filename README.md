@@ -46,6 +46,10 @@ rasket Qt-installi) ja lisaks boonusena käsurea-liides skriptimiseks.
 - 🚄 **Embed speed** – eraldi tab, mis **mõõdab embedding-mudeli läbilaskevõimet ja kiirust**:
   hoiab batch-koormust ja raporteerib **embeddings/s, sisend-tokenit/s, req/s ja latentsi** (p50/p95).
   Batch-suurus on eraldi nupp (embedding-serverid batch'ivad efektiivselt). Vt [Embed speed](#embed-speed-embeddingu-kiirus).
+- 🎯 **Embed quality** – eraldi tab, mis **kontrollib, kas embeddingud päriselt töötavad** (mitte
+  kiirust): retrieval-järjestus, parafraas-vs-mitteseotud sim, **eesti↔inglise** cross-lingual,
+  vektori omadused (L2-norm, determinism, dim), sisend/batch piirid + rerank-relevantsus. Iga rida
+  ✓/✗/~ + numbrid. Vt [Embed quality](#embed-quality-kas-embeddingud-töötavad).
 - 📊 **Testid** (Benchmark-tab):
   - **Kiirus** – latentsus (TTFT, aeg esimese tokenini) + läbilaskevõime (dekodeerimise tokenit/s).
   - **Koormustest** – N paralleelset päringut; agregeeritud tok/s ja p50/p95 latentsus.
@@ -599,6 +603,29 @@ latents **p50/p95** ja **ms ühe embeddingu kohta**. Reaalajas graafik näitab e
 > ⚠️ Nagu teised koormustestid, **koormab Embed speed serverit** — jooksuta ainult serverite vastu,
 > mida sa omad või milleks sul on luba.
 
+## Embed quality (kas embeddingud töötavad)
+
+**Embed quality**-tab vastab küsimusele, mida kiirus ei ütle: **kas need embeddingud on tegelikult
+head?** Kiire mudel on kasutu, kui vektorid on mõttetud. Iga rida on üks väike proov → ✓ *pass* /
+✗ *fail* / ~ *weak* koos mõõdetud numbritega. Neli rühma:
+
+- **Retrieval & sarnasus** — kas embeddingud kannavad tähendust:
+  - **Retrieval-järjestus:** päring + dokumendid → **õige dokument peab saama kõrgeima cosine-sim'i**.
+  - **Parafraas vs mitteseotud:** parafraaside sim peab olema **selgelt kõrgem** kui mitteseotud tekstidel.
+  - **Mitmekeelsus (eesti↔inglise):** eesti lause peab embed'uma **lähemale oma inglise tõlkele** kui
+    mitteseotud inglise lausele — testib cross-lingual retrieval'i (relevantne eestikeelse sisu jaoks).
+- **Vektori omadused** — kas sobib vektor-DB-sse:
+  - **L2-normaliseeritus** (‖v‖ ≈ 1 — paljud vektor-DB-d eeldavad seda), **determinism** (sama tekst →
+    identne vektor), **dimensioon**.
+- **Piirid** — kliendi batch'imise disainiks:
+  - **Max sisend-pikkus** (kus mudel kärbib/vea annab) ja **max batch-suurus** (mitu teksti/päring).
+- **Rerank** (kui `/v1/rerank` olemas) — **relevantsus:** kas reranker paneb relevantse dokumendi
+  esimeseks. Kui embedding-mudel pole reranker, otsitakse automaatselt rerank-nimelist mudelit.
+
+Skann teeb ~20 kiiret päringut ja **ei tekita koormust**. Embedding-mudel on tavaliselt chat-mudelist
+erinev — jooksuta enne **Capabilities** tab, et näha, milline mudel embed'ib. **Copy results** kopeerib
+tab-eraldatud tabeli.
+
 ## Eelseaded, võrdlus ja raportid
 
 ### Koormuse eelseaded
@@ -659,12 +686,12 @@ skannimine võib olla seadusevastane.
 
 ```
 llmscanner/
-├── gui.py        # Tkinter GUI (peamine) — Connection / Benchmark / Optimum finder / Soak / Capacity / Model fit / Provider fit / Capabilities / Embed speed / Scan / History
+├── gui.py        # Tkinter GUI (peamine) — Connection / Benchmark / Optimum finder / Soak / Capacity / Model fit / Provider fit / Capabilities / Embed speed / Embed quality / Scan / History
 ├── cli.py        # käsurea-liides (boonus, vajab rich)
 ├── client.py     # OpenAI-ühilduv async klient (http/https, base_path) + ajamõõtmine
 ├── detect.py     # serveri tuvastus / fingerprint + smart_detect (kandidaatide proovimine)
 ├── scanner.py    # võrguskann + portide tuvastus
-├── benchmark.py  # latentsus / koormus / kontekst / sanity / sweep + find_optima + soak_test + capacity_test + suitability_test (model fit) + provider_readiness + capabilities_probe + embed_speed_test
+├── benchmark.py  # latentsus / koormus / kontekst / sanity / sweep + find_optima + soak_test + capacity_test + suitability_test (model fit) + provider_readiness + capabilities_probe + embed_speed_test + embed_quality_test
 ├── store.py      # SQLite püsivus: salvestatud hostid + kõik tulemused
 ├── icon.py       # rakenduse ikooni (sinine V) genereerimine
 ├── assets/

@@ -2562,3 +2562,276 @@ async def embed_speed_test(client: LLMClient, model: Optional[str], *,
     finally:
         rep.cancel()
     return snapshot()
+
+
+# ---------------------------------------------------------------------------
+# Embedding quality test
+#
+# Beyond speed: does the model produce USEFUL embeddings (retrieval works,
+# paraphrases cluster, cross-lingual pairs align), are the vectors well-formed
+# (L2-normalised, deterministic), and what are its limits (max input tokens,
+# max batch)? Plus an optional reranker relevance check. Each probe → a row with
+# pass/fail and the measured numbers, grouped like the capability scan.
+# ---------------------------------------------------------------------------
+
+_RETR_QUERY = "How often should I feed my cat?"
+_RETR_DOCS = [
+    "Most adult cats should be fed twice a day with a balanced diet.",   # relevant (0)
+    "The central bank raised its benchmark interest rate this week.",
+    "Mount Everest is the highest mountain above sea level on Earth.",
+    "To build the project, run the compile script from your terminal.",
+]
+_PARA_A = "The cat sat quietly on the warm windowsill in the sun."
+_PARA_SIM = "A cat rested calmly on the sunny window ledge."
+_PARA_UNREL = "The company reported record quarterly revenue this year."
+# Estonian sentence, its English translation, and an unrelated English sentence.
+_ML_ET = "Kass istub vaikselt päikesepaistelisel aknalaual."
+_ML_EN = "The cat sits quietly on the sunny windowsill."
+_ML_EN_UNREL = "Global stock markets fell sharply this morning."
+
+_RERANK_QUERY = "What is the capital of Estonia?"
+_RERANK_DOCS = [
+    "Berlin is the capital and largest city of Germany.",
+    "Tallinn is the capital and most populous city of Estonia.",   # relevant (1)
+    "The Baltic Sea borders several countries in northern Europe.",
+]
+# Model-id substrings that flag a dedicated reranker (tried when sweeping).
+_RERANK_HINTS = ("rerank", "reranker", "ce-", "cross-encoder", "colbert")
+
+
+def _cosine(a, b) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def _l2(v) -> float:
+    return math.sqrt(sum(x * x for x in v)) if v else 0.0
+
+
+async def embed_quality_test(client: LLMClient, model: Optional[str], *,
+                             on_progress: Optional[Callable[[dict], None]] = None) -> dict:
+    """Assess embedding QUALITY (not speed): retrieval, similarity structure,
+    cross-lingual alignment, vector properties (L2-norm, determinism, dim), input
+    /batch limits, and an optional reranker relevance check. Streams rows via
+    `on_progress` ({"event":"group"|"item"|"status"|"done"}) like the capability
+    scan. A preflight embed validates the model first."""
+    if not model:
+        try:
+            models = await client.list_models()
+            model = models[0] if models else None
+        except Exception:
+            model = None
+        if not model:
+            raise RuntimeError("No model specified and model listing failed.")
+
+    pf = await client.embed(model=model, inputs=["hello world"], keep_vectors=True)
+    if not pf["ok"]:
+        raise RuntimeError(f"/v1/embeddings failed for model '{model}': {pf['error']}")
+    dim0 = pf["dim"]
+
+    emit = on_progress or (lambda *_: None)
+    groups: list[dict] = []
+    raw = await client.list_models_raw()
+
+    def start(name):
+        g = {"group": name, "items": []}
+        groups.append(g)
+        emit({"event": "group", "group": name})
+        return g
+
+    def add(g, name, status, detail=""):
+        row = {"name": name, "status": status, "detail": detail}
+        g["items"].append(row)
+        emit({"event": "item", "group": g["group"], "item": row})
+        return row
+
+    async def vecs(texts):
+        r = await client.embed(model=model, inputs=texts, keep_vectors=True)
+        return r.get("vectors") if r["ok"] else None
+
+    # ---- Group 1: retrieval & similarity ------------------------------------
+    g_ret = start("Retrieval & similarity")
+
+    # Retrieval sanity: the relevant doc must rank first by cosine to the query.
+    rv = await vecs([_RETR_QUERY] + _RETR_DOCS)
+    if not rv or len(rv) != len(_RETR_DOCS) + 1:
+        add(g_ret, "Retrieval ranking", "error", "embedding call failed")
+    else:
+        q, docs = rv[0], rv[1:]
+        sims = [_cosine(q, d) for d in docs]
+        best = max(range(len(sims)), key=lambda i: sims[i])
+        second = sorted(sims, reverse=True)[1]
+        ok = best == 0 and (sims[0] - second) > 0.02
+        add(g_ret, "Retrieval ranking", "yes" if ok else "no",
+            f"relevant doc sim {sims[0]:.2f} vs best-distractor {second:.2f}"
+            + ("" if ok else f" — ranked #{best + 1} instead"))
+
+    # Paraphrase clusters, unrelated separates.
+    pv = await vecs([_PARA_A, _PARA_SIM, _PARA_UNREL])
+    if not pv or len(pv) != 3:
+        add(g_ret, "Paraphrase vs unrelated", "error", "embedding call failed")
+    else:
+        s_par = _cosine(pv[0], pv[1])
+        s_unrel = _cosine(pv[0], pv[2])
+        ok = s_par > s_unrel + 0.1
+        add(g_ret, "Paraphrase vs unrelated", "yes" if ok else "no",
+            f"paraphrase sim {s_par:.2f} vs unrelated {s_unrel:.2f}"
+            + ("" if ok else " — too close, weak semantic separation"))
+
+    # Cross-lingual: Estonian sentence should align with its English translation
+    # more than with an unrelated English sentence.
+    mv = await vecs([_ML_ET, _ML_EN, _ML_EN_UNREL])
+    if not mv or len(mv) != 3:
+        add(g_ret, "Multilingual (Estonian ↔ English)", "error", "embedding call failed")
+    else:
+        s_tr = _cosine(mv[0], mv[1])
+        s_un = _cosine(mv[0], mv[2])
+        ok = s_tr > s_un + 0.05 and s_tr > 0.4
+        status = "yes" if ok else ("maybe" if s_tr > s_un else "no")
+        add(g_ret, "Multilingual (Estonian ↔ English)", status,
+            f"ET↔EN translation sim {s_tr:.2f} vs unrelated {s_un:.2f}"
+            + ("" if ok else " — likely English-only / weak cross-lingual"))
+
+    # ---- Group 2: vector properties -----------------------------------------
+    g_prop = start("Vector properties")
+
+    nv = await vecs([_PARA_A])
+    if nv and nv[0]:
+        norm = _l2(nv[0])
+        ok = 0.97 <= norm <= 1.03
+        add(g_prop, "L2 normalised (‖v‖ ≈ 1)", "yes" if ok else "no",
+            f"‖v‖ = {norm:.3f}" + ("" if ok else " — normalise before cosine/dot search"))
+    else:
+        add(g_prop, "L2 normalised (‖v‖ ≈ 1)", "error", "embedding call failed")
+
+    a1 = await vecs([_PARA_A])
+    a2 = await vecs([_PARA_A])
+    if a1 and a2 and a1[0] and a2[0]:
+        maxdiff = max(abs(x - y) for x, y in zip(a1[0], a2[0]))
+        ok = maxdiff < 1e-5
+        add(g_prop, "Deterministic (repeatable vectors)",
+            "yes" if ok else ("maybe" if maxdiff < 1e-3 else "no"),
+            f"max element delta {maxdiff:.1e} across two calls")
+    else:
+        add(g_prop, "Deterministic (repeatable vectors)", "error", "embedding call failed")
+
+    add(g_prop, "Vector dimension", "yes" if dim0 else "no",
+        f"{dim0} floats" if dim0 else "unknown")
+
+    # ---- Group 3: limits ----------------------------------------------------
+    g_lim = start("Limits")
+    emit({"event": "status", "text": "probing max input length…"})
+    max_ok, trunc_at = 0, None
+    for size in (512, 2048, 8192):
+        r = await client.embed(model=model, inputs=[_filler(size)])
+        if not r["ok"]:
+            break
+        max_ok = size
+        sent = approx_tokens(_filler(size))
+        if r["tokens"] and r["tokens"] < sent * 0.7:
+            trunc_at = r["tokens"]
+            break
+    if trunc_at:
+        add(g_lim, "Max input length", "yes", f"silently truncates at ~{trunc_at} tokens")
+    elif max_ok:
+        add(g_lim, "Max input length", "yes",
+            f"handled ~{max_ok} tokens" + (" (largest tested)" if max_ok >= 8192 else "; errors above"))
+    else:
+        add(g_lim, "Max input length", "no", "failed even at ~512 tokens")
+
+    emit({"event": "status", "text": "probing max batch size…"})
+    max_batch = 0
+    for bs in (1, 32, 256, 1024):
+        r = await client.embed(model=model, inputs=["hello world"] * bs)
+        if r["ok"] and r["n"] >= bs:
+            max_batch = bs
+        else:
+            break
+    add(g_lim, "Max batch size", "yes" if max_batch else "no",
+        (f"≥{max_batch} inputs/request (largest tested)" if max_batch >= 1024
+         else f"~{max_batch} inputs/request" if max_batch else "batch of 1 failed"))
+
+    # ---- Group 4: reranking (only if /v1/rerank is served) ------------------
+    rr = await client.probe_json("POST", "/v1/rerank",
+                                 {"model": model, "query": _RERANK_QUERY,
+                                  "documents": _RERANK_DOCS})
+    rerank_path = "/v1/rerank"
+    if not rr["present"]:
+        rr2 = await client.probe_json("POST", "/rerank",
+                                      {"model": model, "query": _RERANK_QUERY,
+                                       "documents": _RERANK_DOCS})
+        if rr2["present"]:
+            rr, rerank_path = rr2, "/rerank"
+    if rr["present"]:
+        g_rr = start("Reranking")
+        rmodel, res = model, rr
+        if res["status"] != 200 or _rerank_top_index(res) is None:
+            # The embedding model probably isn't a reranker — sweep for one. Adopt
+            # the first model that returns a usable 200 (so we can judge its
+            # ranking) and stop early if one also ranks correctly.
+            cands = [m.get("id") for m in raw
+                     if m.get("id") and m.get("id") != model
+                     and any(h in m.get("id", "").lower() for h in _RERANK_HINTS)]
+            if cands:
+                emit({"event": "status", "text": f"trying {len(cands)} reranker model(s)…"})
+            for mid in cands[:6]:
+                cand = await client.probe_json("POST", rerank_path,
+                                               {"model": mid, "query": _RERANK_QUERY,
+                                                "documents": _RERANK_DOCS})
+                if cand["status"] == 200 and _rerank_top_index(cand) is not None:
+                    rmodel, res = mid, cand
+                    if _rerank_top_ok(cand):
+                        break
+        top = _rerank_top_index(res)
+        if res["status"] == 200 and top is not None:
+            ok = top == 1  # _RERANK_DOCS[1] is the relevant one
+            via = "" if rmodel == model else f" (via ‘{rmodel}’)"
+            add(g_rr, "Relevance ranking", "yes" if ok else "no",
+                (f"ranked the relevant doc #1{via}" if ok
+                 else f"ranked doc #{top + 1} first, not the relevant one{via}"))
+        else:
+            add(g_rr, "Relevance ranking", "no",
+                f"no usable rerank result — {_http_detail(res)}")
+
+    supported = sum(1 for g in groups for it in g["items"] if it["status"] == "yes")
+    total = sum(1 for g in groups for it in g["items"] if it["status"] in ("yes", "no", "maybe"))
+    report = {"model": model, "dim": dim0, "groups": groups,
+              "supported": supported, "total": total}
+    emit({"event": "done", "report": report})
+    return report
+
+
+def _rerank_results(res: dict) -> list:
+    """Normalise a rerank response to (index, score) pairs across the common
+    shapes (OpenAI-style {results:[{index,relevance_score}]}, TEI [{index,score}])."""
+    obj = res.get("json")
+    if isinstance(obj, dict):
+        items = obj.get("results") or obj.get("data") or []
+    elif isinstance(obj, list):
+        items = obj
+    else:
+        items = []
+    out = []
+    for it in items:
+        if isinstance(it, dict) and it.get("index") is not None:
+            out.append((int(it["index"]),
+                        it.get("relevance_score", it.get("score", 0.0))))
+    return out
+
+
+def _rerank_top_index(res: dict):
+    """The document index the reranker scored highest, or None."""
+    if res.get("status") != 200:
+        return None
+    items = _rerank_results(res)
+    if not items:
+        return None
+    return max(items, key=lambda t: t[1])[0]
+
+
+def _rerank_top_ok(res: dict) -> bool:
+    return _rerank_top_index(res) == 1

@@ -203,13 +203,16 @@ class LLMClient:
         return {"status": r.status_code, "json": obj, "text": text,
                 "error": err, "present": present}
 
-    async def embed(self, *, model: str, inputs: list, timeout: Optional[float] = None) -> dict:
+    async def embed(self, *, model: str, inputs: list, timeout: Optional[float] = None,
+                    keep_vectors: bool = False) -> dict:
         """POST a batch of texts to /v1/embeddings and time it.
 
         Returns {ok, latency, n, dim, tokens, error}: `n` embeddings returned,
         `dim` vector size, `tokens` the server-reported prompt tokens (0 if not
         sent), `latency` wall-clock seconds for the whole batch. Used by the
-        embedding speed test to measure throughput (embeddings/s, tokens/s)."""
+        embedding speed test to measure throughput (embeddings/s, tokens/s).
+        With `keep_vectors=True` the result also has "vectors" (list of float
+        lists) — used by the embedding quality test."""
         url = f"{self.base_url}/v1/embeddings"
         to = timeout if timeout is not None else self.timeout
         start = time.perf_counter()
@@ -239,8 +242,11 @@ class LLMClient:
         first = data[0].get("embedding") if data and isinstance(data[0], dict) else None
         dim = len(first) if isinstance(first, list) else 0
         tokens = int((obj.get("usage") or {}).get("prompt_tokens") or 0)
-        return {"ok": True, "latency": dt, "n": len(data), "dim": dim,
-                "tokens": tokens, "error": ""}
+        out = {"ok": True, "latency": dt, "n": len(data), "dim": dim,
+               "tokens": tokens, "error": ""}
+        if keep_vectors:
+            out["vectors"] = [d.get("embedding") for d in data if isinstance(d, dict)]
+        return out
 
     def _payload(self, model, prompt, max_tokens, temperature, system, include_usage,
                  force_output=False, stop=None, top_p=None, seed=None, logprobs=False,
