@@ -203,6 +203,45 @@ class LLMClient:
         return {"status": r.status_code, "json": obj, "text": text,
                 "error": err, "present": present}
 
+    async def embed(self, *, model: str, inputs: list, timeout: Optional[float] = None) -> dict:
+        """POST a batch of texts to /v1/embeddings and time it.
+
+        Returns {ok, latency, n, dim, tokens, error}: `n` embeddings returned,
+        `dim` vector size, `tokens` the server-reported prompt tokens (0 if not
+        sent), `latency` wall-clock seconds for the whole batch. Used by the
+        embedding speed test to measure throughput (embeddings/s, tokens/s)."""
+        url = f"{self.base_url}/v1/embeddings"
+        to = timeout if timeout is not None else self.timeout
+        start = time.perf_counter()
+        try:
+            async with self._http(timeout=to) as c:
+                r = await c.post(url, headers=self._headers(),
+                                 json={"model": model, "input": inputs})
+        except Exception as e:
+            return {"ok": False, "latency": time.perf_counter() - start, "n": 0,
+                    "dim": 0, "tokens": 0, "error": f"{type(e).__name__}: {e}"}
+        dt = time.perf_counter() - start
+        obj = None
+        try:
+            obj = r.json()
+        except Exception:
+            pass
+        if r.status_code >= 400 or not isinstance(obj, dict):
+            body = ""
+            if obj is None:
+                try:
+                    body = r.text[:300]
+                except Exception:
+                    body = ""
+            return {"ok": False, "latency": dt, "n": 0, "dim": 0, "tokens": 0,
+                    "error": _extract_error(obj) or body or f"HTTP {r.status_code}"}
+        data = obj.get("data") or []
+        first = data[0].get("embedding") if data and isinstance(data[0], dict) else None
+        dim = len(first) if isinstance(first, list) else 0
+        tokens = int((obj.get("usage") or {}).get("prompt_tokens") or 0)
+        return {"ok": True, "latency": dt, "n": len(data), "dim": dim,
+                "tokens": tokens, "error": ""}
+
     def _payload(self, model, prompt, max_tokens, temperature, system, include_usage,
                  force_output=False, stop=None, top_p=None, seed=None, logprobs=False,
                  tools=None, tool_choice=None):

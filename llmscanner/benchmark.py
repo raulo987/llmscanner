@@ -2457,3 +2457,108 @@ def _json_probe_row(name: str, rp: dict, required=None) -> dict:
         return _cap_row(name, "no", "returned JSON but it didn't match the requested schema")
     return _cap_row(name, "yes",
                     "enforced the schema" if required else "returned valid JSON")
+
+
+# ---------------------------------------------------------------------------
+# Embedding speed test
+#
+# Throughput + latency for an /v1/embeddings model: hold `concurrency` batch
+# requests in flight for a window and measure embeddings/s, input tokens/s, and
+# per-request latency. Batching matters a lot for embedding servers, so batch
+# size is a first-class knob.
+# ---------------------------------------------------------------------------
+
+async def embed_speed_test(client: LLMClient, model: Optional[str], *,
+                           batch_size: int = 32, concurrency: int = 8,
+                           input_tokens: int = 64, duration_s: float = 15.0,
+                           distinct: bool = True, report_interval: float = 2.0,
+                           on_progress: Optional[Callable[[dict], None]] = None) -> dict:
+    """Measure embedding throughput and latency under sustained load.
+
+    `concurrency` workers each POST a batch of `batch_size` texts (~`input_tokens`
+    tokens each) to /v1/embeddings back-to-back for `duration_s` seconds. Reports
+    embeddings/s (texts), input tokens/s, requests/s, latency p50/p95 and the
+    vector dimension. A preflight embed validates the model first (so picking a
+    chat model fails fast with a clear message). Emits a snapshot every
+    `report_interval`s via `on_progress`. Cancellable at any await.
+    """
+    if not model:
+        try:
+            models = await client.list_models()
+            model = models[0] if models else None
+        except Exception:
+            model = None
+        if not model:
+            raise RuntimeError("No model specified and model listing failed.")
+
+    # Preflight: confirm this model actually embeds, and capture the dimension.
+    pf = await client.embed(model=model, inputs=["hello world"])
+    if not pf["ok"]:
+        raise RuntimeError(f"/v1/embeddings failed for model '{model}': {pf['error']}")
+    dim0 = pf["dim"]
+
+    # Estimated tokens per text — used for tokens/s when the server omits usage.
+    est_per_text = max(1, approx_tokens(_filler(input_tokens)))
+
+    def make_text() -> str:
+        salt = (_unique_prefix(24) + " ") if distinct else ""
+        return salt + _filler(input_tokens, lead=random.randint(0, 10 ** 9))
+
+    start = time.perf_counter()
+    deadline = start + max(1.0, duration_s)
+    # (t_rel, ok, n_texts, tokens_reported, latency, dim, est, err)
+    recs: list[tuple] = []
+
+    async def worker():
+        while time.perf_counter() < deadline:
+            batch = [make_text() for _ in range(batch_size)]
+            r = await client.embed(model=model, inputs=batch)
+            est = r["tokens"] == 0
+            toks = r["tokens"] if r["tokens"] else est_per_text * batch_size
+            recs.append((time.perf_counter() - start, r["ok"], r["n"], toks,
+                         r["latency"], r["dim"], est, "" if r["ok"] else r["error"]))
+            if not r["ok"]:
+                await asyncio.sleep(0.5)
+
+    def snapshot() -> dict:
+        el = max(time.perf_counter() - start, 1e-9)
+        ok = [x for x in recs if x[1]]
+        errs = [x[7] for x in recs if not x[1]]
+        embs = sum(x[2] for x in ok)
+        toks = sum(x[3] for x in ok)
+        lat = [x[4] for x in ok]
+        dim = next((x[5] for x in reversed(ok) if x[5]), dim0)
+        est_frac = (sum(1 for x in ok if x[6]) / len(ok)) if ok else 0.0
+        # windowed embeddings/s series for the chart
+        buckets: dict = {}
+        for x in ok:
+            b = int(x[0] // report_interval)
+            buckets[b] = buckets.get(b, 0) + x[2]
+        series = [(f"{int(b * report_interval)}s", cnt / report_interval)
+                  for b, cnt in sorted(buckets.items())]
+        return {
+            "elapsed": el, "remaining": max(0.0, deadline - time.perf_counter()),
+            "duration": duration_s, "concurrency": concurrency, "batch_size": batch_size,
+            "requests": len(recs), "success": len(ok), "errors": len(errs),
+            "embeddings": embs, "tokens": toks, "dim": dim,
+            "emb_per_s": embs / el, "tok_per_s": toks / el, "req_per_s": len(ok) / el,
+            "lat_p50": _pct(lat, 0.5), "lat_p95": _pct(lat, 0.95),
+            "lat_mean": (sum(lat) / len(lat)) if lat else 0.0,
+            "ms_per_emb": (1000.0 * sum(lat) / embs) if embs else 0.0,
+            "est_frac": est_frac, "error_samples": errs[:3], "series": series,
+            "model": model, "input_tokens": input_tokens,
+        }
+
+    async def reporter():
+        while time.perf_counter() < deadline:
+            await asyncio.sleep(report_interval)
+            if on_progress:
+                on_progress(snapshot())
+
+    workers = [asyncio.create_task(worker()) for _ in range(max(1, concurrency))]
+    rep = asyncio.create_task(reporter())
+    try:
+        await asyncio.gather(*workers)
+    finally:
+        rep.cancel()
+    return snapshot()

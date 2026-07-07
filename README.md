@@ -43,6 +43,9 @@ rasket Qt-installi) ja lisaks boonusena käsurea-liides skriptimiseks.
   API-marsruudid (**embeddings**, rerank, tokenize, moderations, audio, images) ja chat-funktsioonid
   (voogedastus, tööriista-kutsed, JSON-režiim, vision, logprobs, seed, reasoning). Iga rida =
   üks kiire proov → ✓ / ✗ / ~ / n/a. Vt [Capabilities](#capabilities-mida-endpoint-pakub).
+- 🚄 **Embed speed** – eraldi tab, mis **mõõdab embedding-mudeli läbilaskevõimet ja kiirust**:
+  hoiab batch-koormust ja raporteerib **embeddings/s, sisend-tokenit/s, req/s ja latentsi** (p50/p95).
+  Batch-suurus on eraldi nupp (embedding-serverid batch'ivad efektiivselt). Vt [Embed speed](#embed-speed-embeddingu-kiirus).
 - 📊 **Testid** (Benchmark-tab):
   - **Kiirus** – latentsus (TTFT, aeg esimese tokenini) + läbilaskevõime (dekodeerimise tokenit/s).
   - **Koormustest** – N paralleelset päringut; agregeeritud tok/s ja p50/p95 latentsus.
@@ -568,6 +571,34 @@ Kolm rühma:
 Skann teeb ~kaks tosinat kiiret päringut ja **ei tekita koormust**. Tulemuse saab **Copy results**
 nupuga tab-eraldatud tabelina lõikelauale.
 
+## Embed speed (embeddingu kiirus)
+
+**Embed speed**-tab mõõdab **embedding-mudeli jõudlust ja kiirust** — mitu vektorit sekundis server
+suudab toota ja kui kiiresti üks päring vastab. Erineb teistest testidest, mis mõõdavad chat-mudeli
+genereerimist: siin läheb koormus `/v1/embeddings` otspunkti.
+
+Kuidas töötab:
+
+- **Batch-koormus:** `concurrency` töölist saadavad pidevalt päringuid, igas päringus **`batch_size`
+  teksti** (~`input_tokens` tokenit tekst) `duration_s` sekundi jooksul. Embedding-serverid **batch'ivad
+  väga efektiivselt**, seega on batch-suurus eraldi nupp — suurem batch tähendab tavaliselt palju rohkem
+  embeddings/s (kuni serveri piirini).
+- **Preflight:** enne testi tehakse üks väike embed, et kinnitada, et mudel **päriselt embed'ib** ja
+  saada vektori dimensioon. Kui valid chat-mudeli, mis ei embed'i, peatub test **selge teatega**
+  (nt *"model X is not an embedding model"*).
+- **Mudeli valik:** embedding-mudel on **tavaliselt erinev** su chat-mudelist (nt bge-m3, e5, nomic).
+  Sisesta see "Embedding model" väljale (tühjaks jättes kasutab ülal valitud mudelit). Jooksuta enne
+  **Capabilities** tab, et näha, milline mudel embed'ib.
+
+**Tulemus:** **embeddings/s** (vektorit sekundis), **sisend-tokenit/s**, req/s, **vektori dimensioon**,
+latents **p50/p95** ja **ms ühe embeddingu kohta**. Reaalajas graafik näitab embeddings/s ajas.
+
+**Näide:** bge-m3, batch 32, concurrency 8, 64 tok/text, 15 s → näed nt "2 500 emb/s · 160 K tok/s
+(dim 1024) · p95 24 ms". Tõsta batch-suurust (64 / 128), et leida tipp-läbilaskevõime.
+
+> ⚠️ Nagu teised koormustestid, **koormab Embed speed serverit** — jooksuta ainult serverite vastu,
+> mida sa omad või milleks sul on luba.
+
 ## Eelseaded, võrdlus ja raportid
 
 ### Koormuse eelseaded
@@ -628,12 +659,12 @@ skannimine võib olla seadusevastane.
 
 ```
 llmscanner/
-├── gui.py        # Tkinter GUI (peamine) — Connection / Benchmark / Optimum finder / Soak / Capacity / Model fit / Provider fit / Capabilities / Scan / History
+├── gui.py        # Tkinter GUI (peamine) — Connection / Benchmark / Optimum finder / Soak / Capacity / Model fit / Provider fit / Capabilities / Embed speed / Scan / History
 ├── cli.py        # käsurea-liides (boonus, vajab rich)
 ├── client.py     # OpenAI-ühilduv async klient (http/https, base_path) + ajamõõtmine
 ├── detect.py     # serveri tuvastus / fingerprint + smart_detect (kandidaatide proovimine)
 ├── scanner.py    # võrguskann + portide tuvastus
-├── benchmark.py  # latentsus / koormus / kontekst / sanity / sweep + find_optima + soak_test + capacity_test + suitability_test (model fit) + provider_readiness + capabilities_probe
+├── benchmark.py  # latentsus / koormus / kontekst / sanity / sweep + find_optima + soak_test + capacity_test + suitability_test (model fit) + provider_readiness + capabilities_probe + embed_speed_test
 ├── store.py      # SQLite püsivus: salvestatud hostid + kõik tulemused
 ├── icon.py       # rakenduse ikooni (sinine V) genereerimine
 ├── assets/

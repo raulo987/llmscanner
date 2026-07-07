@@ -6,6 +6,17 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
+### 2026-07-07 (uus Embed speed -tab — embedding-mudeli jõudlus)
+- **Uus "Embed speed" tab (Capabilities järel)** — mõõdab embedding-mudeli **läbilaskevõimet ja
+  kiirust**: hoiab `concurrency` batch-päringut (igas `batch_size` teksti ~`input_tokens` tokenit)
+  `/v1/embeddings` otspunkti vastu `duration_s` sekundit ja raporteerib **embeddings/s, sisend-tokenit/s,
+  req/s, vektori dimensiooni** ja latentsi **p50/p95** + ms/embedding. Reaalajas graafik (emb/s ajas).
+- **Batch-suurus on eraldi nupp** (embedding-serverid batch'ivad efektiivselt — suurem batch = rohkem
+  emb/s). **Preflight** embed kinnitab enne testi, et mudel päriselt embed'ib; chat-mudeli valimisel
+  peatub test selge teatega. "Embedding model" väli (tühi → kasutab ülal valitud mudelit), kuna
+  embedding-mudel on tavaliselt chat-mudelist erinev.
+- Klient sai `embed(model, inputs)` ajastatud meetodi (dim + usage-tokenid); backend `embed_speed_test()`.
+
 ### 2026-07-07 (Capabilities: täpsem JSON-režiimi tuvastus + puhastus)
 - **JSON schema tuvastus ei anna enam valet "yes"-i** — server, mis `response_format`'i vaikselt
   ignoreerib (tagastab proosa), näitas varem "yes", kui väljund juhtus JSON olema. Nüüd kasutab

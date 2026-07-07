@@ -61,7 +61,7 @@ TR_ET = {
     "Connection": "Ühendus", "Benchmark": "Jõudlus", "Optimum finder": "Optimeerija",
     "Soak": "Püsikoormus", "Capacity": "Võimsus",
     "Model fit": "Mudeli sobivus", "Provider fit": "Pakkuja sobivus",
-    "Capabilities": "Võimekused",
+    "Capabilities": "Võimekused", "Embed speed": "Embed-kiirus",
     "Network scan": "Võrguskann", "History": "Ajalugu",
     # section titles
     "Saved hosts (quick-select)": "Salvestatud hostid (kiirvalik)",
@@ -72,6 +72,7 @@ TR_ET = {
     "Token capacity (peak tokens / minute)": "Token-võimsus (tipp tokenit / minutis)",
     "Capabilities — what this endpoint/model offers":
         "Võimekused — mida see endpoint/mudel pakub",
+    "Embedding speed (throughput & latency)": "Embeddingu kiirus (läbilaskevõime & latents)",
     "Live": "Reaalajas",
     "Model fit — Openclaw / Hermes suitability": "Mudeli sobivus — Openclaw / Hermes",
     "Provider fit — OpenRouter / HuggingFace readiness":
@@ -102,6 +103,7 @@ TR_ET = {
     "Run benchmark": "Käivita benchmark", "Find optima": "Leia optimum",
     "Run soak test": "Käivita soak-test", "Run capacity test": "Käivita võimsus-test",
     "Run capability scan": "Käivita võimekuse-skann",
+    "Run embed speed test": "Käivita embed-kiiruse test",
     "Run model-fit test": "Käivita model-fit test",
     "Run provider-fit test": "Käivita provider-fit test", "Scan network": "Skanni võrku",
     "Stop": "Peata", "Cancel": "Tühista", "Clear": "Tühjenda", "Clear all": "Tühjenda kõik",
@@ -128,6 +130,8 @@ TR_ET = {
     "Set the load and press ‘Run capacity test’.": "Sea koormus ja vajuta ‘Käivita võimsus-test’.",
     "Press ‘Run capability scan’ to inventory this endpoint.":
         "Vajuta ‘Käivita võimekuse-skann’, et see endpoint kaardistada.",
+    "Pick an embedding model and press ‘Run embed speed test’.":
+        "Vali embedding-mudel ja vajuta ‘Käivita embed-kiiruse test’.",
     "Pick the checks and press ‘Run model-fit test’.":
         "Vali kontrollid ja vajuta ‘Käivita model-fit test’.",
     "Set the traffic shape and press ‘Run provider-fit test’.":
@@ -423,6 +427,27 @@ INFO = {
         "Optional. Your required capacity in tokens per minute (e.g. a contracted TPM or the "
         "peak load you must serve). If set, the result adds a PASS/FAIL: does the measured "
         "peak capacity meet it? Leave empty to just measure the ceiling."),
+    # ---- Embed speed ----
+    "emb_model": (
+        "The embedding model to test (POSTed to /v1/embeddings). This is usually a DIFFERENT "
+        "model from your chat model — e.g. bge-m3, e5, nomic-embed. Leave empty to use the model "
+        "selected at the top. Run the Capabilities tab first to see which model embeds. A quick "
+        "preflight embed runs before the test; if the model can't embed, the test stops with a "
+        "clear message."),
+    "emb_batch": (
+        "Texts per request — embedding servers batch efficiently, so a bigger batch usually means "
+        "far more embeddings/second (up to the server's limit). 32 is a good start; try 8 / 64 / 128 "
+        "to find where throughput stops rising."),
+    "emb_conc": (
+        "How many batch requests to keep in flight at once. Raise it until embeddings/second stops "
+        "climbing (the server is saturated) or errors appear."),
+    "emb_intok": (
+        "Approximate tokens per text — the length of each item embedded. Short (~64) is typical for "
+        "search queries / chunks; raise it for long-document embedding. Longer texts = more tokens/s "
+        "of work but fewer embeddings/s."),
+    "emb_dur": (
+        "How long to hold the load, in seconds. 15–30 s gives a stable sustained rate. The test "
+        "reports embeddings/s, input tokens/s, requests/s and per-request latency over the run."),
     # ---- Model fit (Openclaw / Hermes) ----
     "fit_tool": (
         "Function calling. The model is given tools via the native OpenAI `tools` "
@@ -992,11 +1017,13 @@ class App:
         widgets update themselves; the custom tk canvas/text/tree do not."""
         self.pal = _palette()
         self._style_trees()
-        for name in ("bench_log", "opt_log", "soak_log", "capacity_log", "fit_log", "ready_log"):
+        for name in ("bench_log", "opt_log", "soak_log", "capacity_log", "embed_log",
+                     "fit_log", "ready_log"):
             log = getattr(self, name, None)
             if log is not None:
                 log.retheme(self.pal)
-        for name in ("bench_chart", "opt_chart", "soak_chart", "capacity_chart", "ready_chart"):
+        for name in ("bench_chart", "opt_chart", "soak_chart", "capacity_chart",
+                     "embed_chart", "ready_chart"):
             ch = getattr(self, name, None)
             if ch is not None:
                 try:
@@ -1101,6 +1128,7 @@ class App:
         self.tab_fit = self.tabview.add(self.L("Model fit"))
         self.tab_ready = self.tabview.add(self.L("Provider fit"))
         self.tab_caps = self.tabview.add(self.L("Capabilities"))
+        self.tab_embed = self.tabview.add(self.L("Embed speed"))
         self.tab_scan = self.tabview.add(self.L("Network scan"))
         self.tab_history = self.tabview.add(self.L("History"))
 
@@ -1112,6 +1140,7 @@ class App:
         self._build_modelfit_tab()
         self._build_readiness_tab()
         self._build_capabilities_tab()
+        self._build_embed_tab()
         self._build_scan_tab()
         self._build_history_tab()
         self._style_trees()
@@ -2772,6 +2801,149 @@ class App:
         self.root.clipboard_append(text)
         self._set_status("Copied capabilities to the clipboard.")
 
+    # -------------------------------------------------------- Embed speed tab
+    def _build_embed_tab(self):
+        self.var_emb_model = tk.StringVar(value="")
+        self.var_emb_batch = tk.StringVar(value="32")
+        self.var_emb_conc = tk.StringVar(value="8")
+        self.var_emb_intok = tk.StringVar(value="64")
+        self.var_emb_dur = tk.StringVar(value="15")
+
+        sec, top = self._section(self.tab_embed, "Embedding speed (throughput & latency)")
+        sec.pack(fill="x", padx=12, pady=(10, 6))
+        for col, ms in ((0, 150), (1, 150), (2, 30), (3, 150), (4, 150)):
+            top.grid_columnconfigure(col, minsize=ms)
+        top.grid_columnconfigure(5, weight=1)
+
+        self._lbl(top, "Embedding model", INFO["emb_model"]).grid(
+            row=0, column=0, sticky="e", padx=(12, 6), pady=6)
+        ctk.CTkEntry(top, textvariable=self.var_emb_model, width=320,
+                     placeholder_text="(uses the model selected at the top)").grid(
+            row=0, column=1, columnspan=4, sticky="w", pady=6)
+
+        def field(r, pair, label, var, info, w=130):
+            col = 0 if pair == 0 else 3
+            self._lbl(top, label, info).grid(row=r, column=col, sticky="e", padx=(12, 6), pady=6)
+            ctk.CTkEntry(top, textvariable=var, width=w).grid(row=r, column=col + 1, sticky="w", pady=6)
+
+        field(1, 0, "Batch size (texts/req)", self.var_emb_batch, INFO["emb_batch"])
+        field(1, 1, "Concurrency", self.var_emb_conc, INFO["emb_conc"])
+        field(2, 0, "Input tokens / text", self.var_emb_intok, INFO["emb_intok"])
+        field(2, 1, "Duration (s)", self.var_emb_dur, INFO["emb_dur"])
+
+        runbar = ctk.CTkFrame(self.tab_embed, fg_color="transparent")
+        runbar.pack(fill="x", padx=12, pady=4)
+        self.btn_embed = ctk.CTkButton(runbar, text=self.L("Run embed speed test"),
+                                       command=self.on_run_embed)
+        self.btn_embed.pack(side="left")
+        btn_embed_cancel = ctk.CTkButton(runbar, text=self.L("Stop"), width=80, state="disabled",
+                                         fg_color="#b04a4a", hover_color="#963c3c",
+                                         command=self.cancel_current)
+        btn_embed_cancel.pack(side="left", padx=8)
+        self._cancel_btns.append(btn_embed_cancel)
+        ctk.CTkLabel(runbar, text="Holds a batched embedding load and reports embeddings/s, "
+                                  "tokens/s and latency — raise batch size for peak throughput.",
+                     text_color=self.pal["sub"]).pack(side="left", padx=10)
+
+        self.embed_readout = ctk.CTkLabel(
+            self.tab_embed, text=self.L("Pick an embedding model and press ‘Run embed speed test’."),
+            anchor="w", justify="left", font=ctk.CTkFont(size=15, weight="bold"))
+        self.embed_readout.pack(fill="x", padx=16, pady=(2, 4))
+
+        sec3, body = self._section(self.tab_embed, "Live")
+        sec3.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        split = ttk.PanedWindow(body, orient="horizontal")
+        split.pack(fill="both", expand=True)
+        left = ctk.CTkFrame(split, fg_color="transparent")
+        right = ctk.CTkFrame(split)
+        split.add(left, weight=3)
+        split.add(right, weight=2)
+        self.embed_chart = ChartCanvas(left, height=220)
+        self.embed_chart.pack(fill="both", expand=True)
+        self.embed_log = LiveLog(right, self.pal, fg_color="transparent")
+        self.embed_log.pack(fill="both", expand=True)
+
+    def on_run_embed(self):
+        try:
+            target = resolve_target(self.var_host.get(), self.var_port.get())
+            cfg = {
+                "batch_size": max(1, int(self.var_emb_batch.get())),
+                "concurrency": max(1, int(self.var_emb_conc.get())),
+                "input_tokens": max(1, int(self.var_emb_intok.get())),
+                "duration_s": max(1.0, float(self.var_emb_dur.get())),
+                "timeout": float(self.var_timeout.get() or 95),
+            }
+        except ValueError as e:
+            return self._error(ValueError(f"Invalid number: {e}"))
+        model = self.var_emb_model.get().strip() or self._resolved_model()
+        if not model:
+            return self._error(ValueError("No embedding model — enter one or select a model at the top."))
+
+        client = LLMClient.from_target(
+            target, api_key=self.var_apikey.get().strip() or "EMPTY",
+            timeout=cfg["timeout"], endpoint=self.var_endpoint.get())
+        self._remember_endpoint(target.host, target.port)
+        self.embed_chart.clear()
+        self.embed_log.clear()
+        self._embed_default_color = self.embed_readout.cget("text_color")
+        self.embed_log.write(f"▶ Embed speed · {client.base_url}", "head")
+        self.embed_log.write(
+            f"        model {model} · batch {cfg['batch_size']} · c={cfg['concurrency']} · "
+            f"{cfg['input_tokens']} tok/text · {cfg['duration_s']:g}s", "dim")
+        self.embed_readout.configure(text=f"Preflight embed for {model} …",
+                                     text_color=self._embed_default_color)
+
+        def on_progress(snap):
+            self.post(lambda s=snap: self._embed_progress(s))
+
+        self.run_async(
+            B.embed_speed_test(client, model, batch_size=cfg["batch_size"],
+                               concurrency=cfg["concurrency"], input_tokens=cfg["input_tokens"],
+                               duration_s=cfg["duration_s"], on_progress=on_progress),
+            self._embed_done, status="Embed speed test running…")
+
+    def _embed_readout_text(self, s: dict) -> str:
+        est = "  ⚠ est-tokens" if s.get("est_frac", 0) >= 0.5 else ""
+        return (f"⏱ {self._fmt_hms(s['elapsed'])} / {self._fmt_hms(s['duration'])}   "
+                f"(dim {s['dim']} · {s['success']} req ok · {s['errors']} err)\n"
+                f"EMBEDDINGS  {s['emb_per_s']:>10,.0f} /s   ·   INPUT {s['tok_per_s']:>12,.0f} tok/s\n"
+                f"batch {s['batch_size']} · {s['req_per_s']:.1f} req/s · latency p50 {s['lat_p50']*1000:.0f}ms "
+                f"/ p95 {s['lat_p95']*1000:.0f}ms · {s['ms_per_emb']:.2f} ms/emb{est}")
+
+    def _embed_progress(self, s: dict):
+        self.embed_readout.configure(text=self._embed_readout_text(s))
+        self._set_status(f"Embed: {self._fmt_hms(s['remaining'])} left · {s['emb_per_s']:.0f} emb/s")
+        if s.get("series"):
+            self.embed_chart.plot(s["series"], title="embeddings/s over time", unit="emb/s")
+
+    def _embed_done(self, s: dict):
+        self._embed_progress(s)
+        GREEN, RED = ("#1c8a44", "#57c07a"), ("#b23b3b", "#e26d6d")
+        ok = s["success"] > 0
+        self.embed_log.write("✓ Embed speed complete" if ok else "✗ Embed speed failed",
+                             "ok" if ok else "err")
+        self.embed_readout.configure(text_color=GREEN if ok else RED)
+        self.embed_log.result(
+            "Embedding throughput",
+            f"{s['emb_per_s']:,.0f} emb/s · {s['tok_per_s']:,.0f} tok/s (dim {s['dim']})",
+            [("embeddings / s", f"{s['emb_per_s']:,.0f}"),
+             ("input tokens / s", f"{s['tok_per_s']:,.0f}"),
+             ("requests / s", f"{s['req_per_s']:.2f}"),
+             ("vector dimension", f"{s['dim']}"),
+             ("batch size", f"{s['batch_size']}"),
+             ("concurrency", f"{s['concurrency']}"),
+             ("latency p50 / p95 (ms)",
+              f"{s['lat_p50']*1000:.0f} / {s['lat_p95']*1000:.0f}"),
+             ("ms per embedding", f"{s['ms_per_emb']:.3f}"),
+             ("total embedded", f"{s['embeddings']:,}"),
+             ("input tokens", f"{s['tokens']:,}"),
+             ("requests", f"{s['success']} ok / {s['errors']} failed"),
+             ("token counts", "estimated" if s.get("est_frac", 0) >= 0.5 else "server-reported")],
+            failed=not ok)
+        for e in s.get("error_samples", []):
+            self.embed_log.write(f"   error: {e[:80]}", "err")
+        self._set_status("Embed speed test complete.")
+
     def _build_scan_tab(self):
         sec, top = self._section(self.tab_scan, "Scan settings")
         sec.pack(fill="x", padx=12, pady=10)
@@ -3204,7 +3376,8 @@ class App:
         self._set_status("Cancelled.")
         for log in (getattr(self, "bench_log", None), getattr(self, "opt_log", None),
                     getattr(self, "soak_log", None), getattr(self, "capacity_log", None),
-                    getattr(self, "fit_log", None), getattr(self, "ready_log", None)):
+                    getattr(self, "embed_log", None), getattr(self, "fit_log", None),
+                    getattr(self, "ready_log", None)):
             if log is not None:
                 log.write("✗ Cancelled by user", "err")
 
@@ -3243,7 +3416,8 @@ class App:
             "Optimum finder": self.on_run_optima, "Soak": self.on_run_soak,
             "Capacity": self.on_run_capacity,
             "Model fit": self.on_run_modelfit, "Provider fit": self.on_run_readiness,
-            "Capabilities": self.on_run_capabilities, "Network scan": self.on_scan,
+            "Capabilities": self.on_run_capabilities, "Embed speed": self.on_run_embed,
+            "Network scan": self.on_scan,
         }
         try:
             current = self.tabview.get()
@@ -3290,7 +3464,7 @@ class App:
         state = "disabled" if busy else "normal"
         for name in ("btn_detect", "btn_models", "btn_run", "btn_scan",
                      "btn_opt", "btn_soak", "btn_capacity", "btn_fit", "btn_ready",
-                     "btn_caps"):
+                     "btn_caps", "btn_embed"):
             b = getattr(self, name, None)
             if b is not None:
                 b.configure(state=state)
@@ -3317,7 +3491,7 @@ class App:
         self._set_status(f"Error: {err}")
         for log in (getattr(self, "bench_log", None), getattr(self, "opt_log", None),
                     getattr(self, "soak_log", None), getattr(self, "capacity_log", None),
-                    getattr(self, "fit_log", None)):
+                    getattr(self, "embed_log", None), getattr(self, "fit_log", None)):
             if log is not None:
                 log.write(f"✗ {err}", "err")
         messagebox.showerror(APP_TITLE, str(err))
