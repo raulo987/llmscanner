@@ -108,7 +108,11 @@ class LLMClient:
 
     def _http(self, **kwargs) -> httpx.AsyncClient:
         # verify=False: local LLM servers commonly use self-signed TLS certs.
-        return httpx.AsyncClient(timeout=self.timeout, verify=False, **kwargs)
+        # setdefault (not explicit kwargs) so a caller can override timeout/verify
+        # without triggering a "multiple values for keyword argument" TypeError.
+        kwargs.setdefault("timeout", self.timeout)
+        kwargs.setdefault("verify", False)
+        return httpx.AsyncClient(**kwargs)
 
     def _headers(self) -> dict:
         return {

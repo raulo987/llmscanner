@@ -2149,6 +2149,12 @@ async def capabilities_probe(client: LLMClient, model: Optional[str], *,
     add(g_api, _cap_row("Model listing (/v1/models)", "yes" if raw else "no",
                         f"{len(raw)} model(s) advertised" if raw else "no /v1/models data"))
 
+    # /health — a liveness route most routers/vLLM expose (usually an empty 200).
+    rh = await client.probe_json("GET", "/health")
+    add(g_api, _cap_row("Health (/health)",
+                        "yes" if rh["status"] == 200 else ("no" if not rh["present"] else "maybe"),
+                        _http_detail(rh)))
+
     # Chat + text completion routes.
     rc = await client.probe_json("POST", "/v1/chat/completions",
                                  {"model": model, "messages": [{"role": "user", "content": "hi"}],

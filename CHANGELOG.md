@@ -6,6 +6,14 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
+### 2026-07-07 (Capabilities: parandatud timeout-viga + /health proov)
+- **Parandatud `TypeError: httpx.AsyncClient() got multiple values for keyword argument 'timeout'`**,
+  mis kukutas KÕIK Capabilities-tabi endpoint-proovid (chat, completions, embeddings jne näitasid
+  valelt "no" koos TypeError-detailiga). Põhjus: `probe_json` andis `_http(timeout=…)`, aga `_http`
+  seadis `timeout` juba ise — nüüd kasutab `_http` `setdefault`-i, nii et kutsuja saab üle kirjutada.
+- **Lisatud `/health` marsruudi proov** (enamik routereid/vLLM pakub seda). Nüüd testitud päris
+  `LLMClient` + httpx MockTransport'iga (mitte ainult mock-objektiga), mis oleks selle vea kohe tabanud.
+
 ### 2026-07-07 (uus Capabilities-tab — funktsionaalsuse avastus)
 - **Uus "Capabilities" tab (Provider-fit järel)** — kaardistab, mis funktsionaalsust endpoint/mudel
   pakub. Kolm rühma: **API-marsruudid** (`/v1/models`, chat, completions, **`/v1/embeddings`** koos
