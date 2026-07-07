@@ -2733,7 +2733,9 @@ class App:
 
     def _capabilities_progress(self, evt: dict):
         kind = evt.get("event")
-        if kind == "group":
+        if kind == "status":
+            self._set_status(evt.get("text", "Capability scan running…"))
+        elif kind == "group":
             self.caps_tree.insert("", "end", values=(f"▸ {evt['group']}", "", ""), tags=("cat",))
         elif kind == "item":
             it = evt["item"]

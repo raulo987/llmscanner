@@ -552,7 +552,9 @@ Kolm rühma:
 
 - **API-marsruudid** — kas server teenindab neid otspunkte:
   - `/v1/models` (mudelite loend), `/v1/chat/completions`, `/v1/completions`
-  - **`/v1/embeddings`** — kui töötab, näidatakse **vektori dimensioon**
+  - **`/v1/embeddings`** — kui töötab, näidatakse **vektori dimensioon**. Kui valitud (chat)mudel
+    ei embed'i, **proovitakse automaatselt teisi `/v1/models` all olevaid mudeleid** (embedding-nimelised
+    esimesena) — nii näed ühe skanniga, kas router üldse embeddings'e pakub ja **millise mudeliga**.
   - `/v1/rerank` (või `/rerank`), `/tokenize` (vLLM), `/v1/moderations`
   - `/v1/images/generations`, `/v1/audio/speech` (TTS), `/v1/audio/transcriptions` (STT)
   - *Marsruudi-tuvastus:* iga vastus peale 404 (ka 400/422 valideerimisviga) tähendab, et otspunkt on

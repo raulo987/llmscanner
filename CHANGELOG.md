@@ -6,6 +6,13 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
+### 2026-07-07 (Capabilities: embeddings proovib kõiki router-mudeleid)
+- **Embeddings-proov proovib nüüd mitut mudelit** — kui valitud (chat)mudel ei embed'i, käib skann
+  automaatselt läbi teised `/v1/models` all olevad mudelid (embedding-nimelised nagu bge/e5/gte/nomic
+  esimesena) ja raporteerib, **kas mõni neist embed'ib ja millise mudeliga** (kuni 12 mudelit). Nii
+  saab mitme-mudeliga routeri puhul (nt apirouter) ühe skanniga vastuse "kas embeddings üldse töötab".
+  Tulemus eristab: ✓ *via model X (dim N)* / ✗ *route present, no embedding model found* / ✗ *no route*.
+
 ### 2026-07-07 (Capabilities: parandatud timeout-viga + /health proov)
 - **Parandatud `TypeError: httpx.AsyncClient() got multiple values for keyword argument 'timeout'`**,
   mis kukutas KÕIK Capabilities-tabi endpoint-proovid (chat, completions, embeddings jne näitasid

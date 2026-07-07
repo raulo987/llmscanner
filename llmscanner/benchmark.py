@@ -2104,6 +2104,11 @@ async def provider_readiness(client: LLMClient, model: Optional[str], *,
 _TINY_PNG = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAA"
              "C1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
 
+# Substrings that flag a model id as (likely) an embedding model — tried first
+# when sweeping a multi-model router for embedding support.
+_EMBED_HINTS = ("embed", "bge", "e5", "gte", "nomic", "minilm", "mxbai", "arctic",
+                "jina", "instructor", "sfr", "stella", "granite-embedding")
+
 
 def _cap_row(name, status, detail=""):
     return {"name": name, "status": status, "detail": detail}
@@ -2168,17 +2173,52 @@ async def capabilities_probe(client: LLMClient, model: Optional[str], *,
                         "yes" if rt["status"] == 200 else ("no" if not rt["present"] else "maybe"),
                         _http_detail(rt)))
 
-    # Embeddings — the capability the user specifically wanted.
-    re_ = await client.probe_json("POST", "/v1/embeddings", {"model": model, "input": "hello world"})
-    emb = (re_["json"] or {}).get("data") if re_["status"] == 200 else None
-    if emb and isinstance(emb, list) and isinstance(emb[0], dict) and emb[0].get("embedding"):
-        dim = len(emb[0]["embedding"])
+    # Embeddings — the capability the user specifically wanted. On a multi-model
+    # router the selected (chat) model usually can't embed, but the same
+    # /v1/embeddings route may serve a dedicated embedding model, so if the
+    # selected model fails we sweep the OTHER advertised models (embedding-looking
+    # names first) to find one that does — answering "does this router do
+    # embeddings at all, and with which model" in a single scan.
+    async def _try_embed(m):
+        rp = await client.probe_json("POST", "/v1/embeddings", {"model": m, "input": "hello world"})
+        data = (rp["json"] or {}).get("data") if rp["status"] == 200 else None
+        d = (len(data[0]["embedding"]) if data and isinstance(data, list)
+             and isinstance(data[0], dict) and isinstance(data[0].get("embedding"), list) else None)
+        return rp, d
+
+    re_, dim = await _try_embed(model)
+    if dim:
         add(g_api, _cap_row("Embeddings (/v1/embeddings)", "yes", f"vector dim {dim}"))
-    elif not re_["present"]:
-        add(g_api, _cap_row("Embeddings (/v1/embeddings)", "no", "no /v1/embeddings route"))
     else:
-        add(g_api, _cap_row("Embeddings (/v1/embeddings)", "no",
-                            f"route present, this model can't embed — {_http_detail(re_)}"))
+        others = [m.get("id") for m in raw if m.get("id") and m.get("id") != model]
+        others.sort(key=lambda mid: 0 if any(h in mid.lower() for h in _EMBED_HINTS) else 1)
+        cap = 12
+        present_any = re_["present"]
+        found, tried = None, 0
+        if others:
+            emit({"event": "status",
+                  "text": f"embeddings: selected model can't embed — trying {min(len(others), cap)} "
+                          f"other model(s)…"})
+        for mid in others[:cap]:
+            rp, d = await _try_embed(mid)
+            tried += 1
+            present_any = present_any or rp["present"]
+            if d:
+                found = (mid, d)
+                break
+        if found:
+            add(g_api, _cap_row("Embeddings (/v1/embeddings)", "yes",
+                                f"via model ‘{found[0]}’ — vector dim {found[1]}"))
+        elif not present_any:
+            add(g_api, _cap_row("Embeddings (/v1/embeddings)", "no", "no /v1/embeddings route"))
+        elif tried:
+            more = f" (checked {tried} of {len(others)})" if len(others) > cap else ""
+            add(g_api, _cap_row("Embeddings (/v1/embeddings)", "no",
+                                f"route present, but no embedding model found{more} — "
+                                f"selected model and {tried} other(s) can't embed"))
+        else:
+            add(g_api, _cap_row("Embeddings (/v1/embeddings)", "no",
+                                f"route present, this model can't embed — {_http_detail(re_)}"))
 
     # Reranking — /v1/rerank (vLLM/Infinity/Jina) or bare /rerank (TEI).
     rr = await client.probe_json("POST", "/v1/rerank",
