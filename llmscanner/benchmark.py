@@ -2900,17 +2900,21 @@ async def vision_test(client: LLMClient, model: Optional[str], *,
     g = start("Image understanding")
 
     # Preflight: does the model accept an image at all? (A text-only model 400s
-    # on image content.) Gates the rest.
+    # on image content.) Gates the rest. Distinguish "image rejected" (not a VL
+    # model) from "couldn't reach the model" (a 5xx/transport error — unknown).
     pre = await ask("Reply with the single word: ok.", [testimg.solid("red", 64)], max_tokens=8)
     if not pre["ok"]:
-        add(g, "Accepts image input", "no",
-            f"not a vision model — {_http_short(pre['error'])}"
-            if pre["status"] else _http_short(pre["error"]))
+        rejected = pre["status"] in (400, 415, 422)
+        add(g, "Accepts image input", "no" if rejected else "error",
+            (f"not a vision model — {_http_short(pre['error'])}" if rejected
+             else f"couldn't reach the model — {_http_short(pre['error'])}"))
+        skip = ("skipped — model doesn't accept images" if rejected
+                else "skipped — model unreachable")
         for name in ("Colour recognition", "Text reading (OCR)", "Number reading (OCR)",
                      "Object counting", "Multiple images"):
-            add(g, name, "na", "skipped — model doesn't accept images")
-        report = {"model": model, "groups": groups, "supported": 0,
-                  "total": 1, "vision": False}
+            add(g, name, "na", skip)
+        report = {"model": model, "groups": groups, "supported": 0, "total": 0,
+                  "vision": False, "reason": "rejected" if rejected else "unreachable"}
         emit({"event": "done", "report": report})
         return report
     add(g, "Accepts image input", "yes", "accepted an image message")
@@ -2962,14 +2966,17 @@ async def vision_test(client: LLMClient, model: Optional[str], *,
         "named both colours" if both
         else (f"partial — model said: {snippet(r)}" if r["ok"] else _http_short(r["error"])))
 
+    # Score is the understanding checks only — count BEFORE adding the
+    # informational latency row so it doesn't inflate "N/N passed".
+    supported = sum(1 for gr in groups for it in gr["items"] if it["status"] == "yes")
+    total = sum(1 for gr in groups for it in gr["items"] if it["status"] in ("yes", "no", "maybe"))
+
     if lat_samples:
         g2 = start("Performance")
-        add(g2, "Image latency (mean)", "yes",
+        add(g2, "Image latency (mean)", "info",
             f"{1000.0 * (sum(lat_samples) / len(lat_samples)):.0f} ms/request "
             f"over {len(lat_samples)} image calls")
 
-    supported = sum(1 for gr in groups for it in gr["items"] if it["status"] == "yes")
-    total = sum(1 for gr in groups for it in gr["items"] if it["status"] in ("yes", "no", "maybe"))
     report = {"model": model, "groups": groups, "supported": supported,
               "total": total, "vision": True}
     emit({"event": "done", "report": report})

@@ -3097,7 +3097,7 @@ class App:
 
     # ------------------------------------------------------------- Vision tab
     _VIS_SYM = {"yes": "✓ pass", "no": "✗ fail", "maybe": "~ partial",
-                "error": "⚠ error", "na": "— n/a"}
+                "error": "⚠ error", "na": "— n/a", "info": "· info"}
 
     def _build_vision_tab(self):
         self.var_vis_model = tk.StringVar(value="")
@@ -3160,6 +3160,7 @@ class App:
         self.vision_tree.tag_configure("maybe", foreground=self.pal["warn"])
         self.vision_tree.tag_configure("error", foreground=self.pal["live_err"])
         self.vision_tree.tag_configure("na", foreground=self.pal["sub"])
+        self.vision_tree.tag_configure("info", foreground=self.pal["sub"])
         wrap.pack(fill="both", expand=True)
 
     def on_run_vision(self):
@@ -3204,10 +3205,14 @@ class App:
         self._vision_report = report
         GREEN, RED = ("#1c8a44", "#57c07a"), ("#b23b3b", "#e26d6d")
         if not report.get("vision"):
-            self.vision_readout.configure(
-                text=f"NOT A VISION MODEL — {report.get('model', '?')} doesn't accept image input.",
-                text_color=RED)
-            self._set_status("Vision test complete — not a VL model.")
+            if report.get("reason") == "unreachable":
+                msg = f"COULDN'T REACH {report.get('model', '?')} — see the error in the table."
+                status = "Vision test — model unreachable."
+            else:
+                msg = f"NOT A VISION MODEL — {report.get('model', '?')} doesn't accept image input."
+                status = "Vision test complete — not a VL model."
+            self.vision_readout.configure(text=msg, text_color=RED)
+            self._set_status(status)
             return
         n, tot = report.get("supported", 0), report.get("total", 0)
         self.vision_readout.configure(

@@ -279,9 +279,18 @@ class LLMClient:
         if r.status_code >= 400 or not isinstance(obj, dict):
             return {"ok": False, "answer": "", "latency": dt, "status": r.status_code,
                     "error": _extract_error(obj) or f"HTTP {r.status_code}"}
-        answer = (((obj.get("choices") or [{}])[0]).get("message", {}) or {}).get("content") or ""
-        return {"ok": True, "answer": answer, "latency": dt,
-                "status": r.status_code, "error": ""}
+        msg = ((obj.get("choices") or [{}])[0]).get("message", {}) or {}
+        content = msg.get("content")
+        if isinstance(content, list):
+            # Some servers return structured content parts — join the text ones.
+            content = " ".join(p.get("text", "") for p in content
+                               if isinstance(p, dict) and p.get("type") == "text")
+        answer = content if isinstance(content, str) else ""
+        # Fall back to a reasoning field if the visible content came back empty.
+        if not answer:
+            answer = msg.get("reasoning_content") or msg.get("reasoning") or ""
+        return {"ok": True, "answer": answer if isinstance(answer, str) else "",
+                "latency": dt, "status": r.status_code, "error": ""}
 
     def _payload(self, model, prompt, max_tokens, temperature, system, include_usage,
                  force_output=False, stop=None, top_p=None, seed=None, logprobs=False,
