@@ -2355,32 +2355,37 @@ async def _probe_chat_features(client: LLMClient, model: str, g, add) -> None:
     else:
         add(g, _cap_row("Tool / function calling (native)", "no", "no tool_calls returned"))
 
-    # JSON object mode.
+    # JSON object mode — the prompt mentions JSON (some servers require it) and the
+    # server must return valid JSON for a "yes".
     rj = await client.probe_json("POST", "/v1/chat/completions", {
-        "model": model, "max_tokens": 80, "temperature": 0.0,
+        "model": model, "max_tokens": 80, "temperature": 0.0, "stream": False,
         "response_format": {"type": "json_object"},
         "messages": [{"role": "user",
-                      "content": 'Return a JSON object: {"city":"Tallinn","country":"Estonia"}'}]})
-    add(g, _json_mode_row("JSON object mode (response_format)", rj))
+                      "content": "Reply with a JSON object giving the capital of Estonia."}]})
+    add(g, _json_probe_row("JSON object mode (response_format)", rj))
 
-    # JSON schema mode (structured outputs).
+    # JSON schema mode (structured outputs) — a NATURAL prompt plus a required-keys
+    # check, so a "yes" means the server actually enforced the schema rather than
+    # silently ignoring response_format and returning prose.
     schema = {"type": "object", "properties": {"city": {"type": "string"},
               "population": {"type": "integer"}}, "required": ["city", "population"]}
     rs = await client.probe_json("POST", "/v1/chat/completions", {
-        "model": model, "max_tokens": 80, "temperature": 0.0,
+        "model": model, "max_tokens": 80, "temperature": 0.0, "stream": False,
         "response_format": {"type": "json_schema",
                             "json_schema": {"name": "city_info", "schema": schema}},
-        "messages": [{"role": "user", "content": "Give city info for Tallinn."}]})
-    add(g, _json_mode_row("JSON schema mode (structured outputs)", rs))
+        "messages": [{"role": "user", "content": "Tell me about the city of Tallinn."}]})
+    add(g, _json_probe_row("JSON schema mode (structured outputs)", rs,
+                           required=("city", "population")))
 
-    # Vision (image input).
+    # Vision (image input). A text-only server rejects image content with a 400
+    # ("content must be a string"), so accepting the message implies multimodal.
     rv = await client.probe_json("POST", "/v1/chat/completions", {
-        "model": model, "max_tokens": 16, "temperature": 0.0,
+        "model": model, "max_tokens": 16, "temperature": 0.0, "stream": False,
         "messages": [{"role": "user", "content": [
             {"type": "text", "text": "What colour is this pixel?"},
             {"type": "image_url", "image_url": {"url": _TINY_PNG}}]}]})
     if rv["status"] == 200:
-        add(g, _cap_row("Vision (image input)", "yes", "accepted an image message"))
+        add(g, _cap_row("Vision (image input)", "yes", "accepted image input"))
     elif not rv["present"]:
         add(g, _cap_row("Vision (image input)", "no", "chat route not found"))
     else:
@@ -2388,7 +2393,7 @@ async def _probe_chat_features(client: LLMClient, model: str, g, add) -> None:
 
     # Multiple choices (n > 1).
     rn = await client.probe_json("POST", "/v1/chat/completions", {
-        "model": model, "max_tokens": 8, "temperature": 1.0, "n": 2,
+        "model": model, "max_tokens": 8, "temperature": 1.0, "n": 2, "stream": False,
         "messages": [{"role": "user", "content": "Say a random word."}]})
     nch = len((rn["json"] or {}).get("choices") or []) if rn["status"] == 200 else 0
     add(g, _cap_row("Multiple choices (n>1)", "yes" if nch >= 2 else "no",
@@ -2435,14 +2440,20 @@ def _http_short(err: str) -> str:
     return " ".join((err or "").split())[:80] or "request failed"
 
 
-def _json_mode_row(name: str, rp: dict) -> dict:
-    """Judge a response_format probe: 200 + parseable JSON content → yes."""
+def _json_probe_row(name: str, rp: dict, required=None) -> dict:
+    """Judge a response_format probe. 200 + valid JSON (and, if `required` is
+    given, containing those keys) → the server enforced structured output ("yes").
+    A 200 with prose (field silently ignored) or missing keys → "no"; a 4xx that
+    rejected the field → "no" with the server's reason."""
     if rp["status"] != 200:
-        return _cap_row(name, "no" if rp["present"] else "no", _http_detail(rp))
+        return _cap_row(name, "no", _http_detail(rp))
     try:
         content = (((rp["json"] or {}).get("choices") or [{}])[0]
                    .get("message", {}).get("content") or "")
-        json.loads(content)
-        return _cap_row(name, "yes", "returned valid JSON")
+        obj = json.loads(content)
     except Exception:
-        return _cap_row(name, "maybe", "accepted but output wasn't strict JSON")
+        return _cap_row(name, "no", "response_format not enforced — output wasn't valid JSON")
+    if required and not (isinstance(obj, dict) and all(k in obj for k in required)):
+        return _cap_row(name, "no", "returned JSON but it didn't match the requested schema")
+    return _cap_row(name, "yes",
+                    "enforced the schema" if required else "returned valid JSON")

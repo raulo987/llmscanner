@@ -6,6 +6,13 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
+### 2026-07-07 (Capabilities: täpsem JSON-režiimi tuvastus + puhastus)
+- **JSON schema tuvastus ei anna enam valet "yes"-i** — server, mis `response_format`'i vaikselt
+  ignoreerib (tagastab proosa), näitas varem "yes", kui väljund juhtus JSON olema. Nüüd kasutab
+  loomulikku prompti + **kontrollib, kas väljund vastab nõutud skeemile** (city + population); ainult
+  siis "yes" ("enforced the schema"), muidu "no". Chat-feature proovid saadavad nüüd `stream:false`
+  (voogedastav server ei riku enam JSON-parse'i). Eemaldatud liiane haru `_json_probe_row`-is.
+
 ### 2026-07-07 (Capabilities: embeddings proovib kõiki router-mudeleid)
 - **Embeddings-proov proovib nüüd mitut mudelit** — kui valitud (chat)mudel ei embed'i, käib skann
   automaatselt läbi teised `/v1/models` all olevad mudelid (embedding-nimelised nagu bge/e5/gte/nomic
