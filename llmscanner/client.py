@@ -248,6 +248,41 @@ class LLMClient:
             out["vectors"] = [d.get("embedding") for d in data if isinstance(d, dict)]
         return out
 
+    async def chat_image(self, *, model: str, prompt: str, image_urls: list,
+                         max_tokens: int = 64, timeout: Optional[float] = None) -> dict:
+        """Ask a vision-language model a question about one or more images.
+
+        Sends a non-streamed chat request whose user message mixes a text part
+        with `image_urls` (data: URIs or http URLs) as OpenAI `image_url` parts.
+        Returns {ok, answer, latency, status, error}. Used by the Vision test to
+        check whether the model actually understands generated test images."""
+        content = [{"type": "text", "text": prompt}]
+        for u in image_urls:
+            content.append({"type": "image_url", "image_url": {"url": u}})
+        body = {"model": model, "temperature": 0.0, "max_tokens": max_tokens,
+                "stream": False, "messages": [{"role": "user", "content": content}]}
+        url = f"{self.base_url}/v1/chat/completions"
+        to = timeout if timeout is not None else self.timeout
+        start = time.perf_counter()
+        try:
+            async with self._http(timeout=to) as c:
+                r = await c.post(url, headers=self._headers(), json=body)
+        except Exception as e:
+            return {"ok": False, "answer": "", "latency": time.perf_counter() - start,
+                    "status": 0, "error": f"{type(e).__name__}: {e}"}
+        dt = time.perf_counter() - start
+        obj = None
+        try:
+            obj = r.json()
+        except Exception:
+            pass
+        if r.status_code >= 400 or not isinstance(obj, dict):
+            return {"ok": False, "answer": "", "latency": dt, "status": r.status_code,
+                    "error": _extract_error(obj) or f"HTTP {r.status_code}"}
+        answer = (((obj.get("choices") or [{}])[0]).get("message", {}) or {}).get("content") or ""
+        return {"ok": True, "answer": answer, "latency": dt,
+                "status": r.status_code, "error": ""}
+
     def _payload(self, model, prompt, max_tokens, temperature, system, include_usage,
                  force_output=False, stop=None, top_p=None, seed=None, logprobs=False,
                  tools=None, tool_choice=None):

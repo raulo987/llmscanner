@@ -62,7 +62,7 @@ TR_ET = {
     "Soak": "Püsikoormus", "Capacity": "Võimsus",
     "Model fit": "Mudeli sobivus", "Provider fit": "Pakkuja sobivus",
     "Capabilities": "Võimekused", "Embed speed": "Embed-kiirus",
-    "Embed quality": "Embed-kvaliteet",
+    "Embed quality": "Embed-kvaliteet", "Vision": "Nägemine",
     "Network scan": "Võrguskann", "History": "Ajalugu",
     # section titles
     "Saved hosts (quick-select)": "Salvestatud hostid (kiirvalik)",
@@ -75,6 +75,8 @@ TR_ET = {
         "Võimekused — mida see endpoint/mudel pakub",
     "Embedding speed (throughput & latency)": "Embeddingu kiirus (läbilaskevõime & latents)",
     "Embedding quality (does it actually work?)": "Embeddingu kvaliteet (kas päriselt töötab?)",
+    "Vision (VL) — does the model understand images?":
+        "Nägemine (VL) — kas mudel mõistab pilte?",
     "Live": "Reaalajas",
     "Model fit — Openclaw / Hermes suitability": "Mudeli sobivus — Openclaw / Hermes",
     "Provider fit — OpenRouter / HuggingFace readiness":
@@ -107,6 +109,7 @@ TR_ET = {
     "Run capability scan": "Käivita võimekuse-skann",
     "Run embed speed test": "Käivita embed-kiiruse test",
     "Run embed quality test": "Käivita embed-kvaliteedi test",
+    "Run vision test": "Käivita nägemis-test",
     "Run model-fit test": "Käivita model-fit test",
     "Run provider-fit test": "Käivita provider-fit test", "Scan network": "Skanni võrku",
     "Stop": "Peata", "Cancel": "Tühista", "Clear": "Tühjenda", "Clear all": "Tühjenda kõik",
@@ -137,6 +140,8 @@ TR_ET = {
         "Vali embedding-mudel ja vajuta ‘Käivita embed-kiiruse test’.",
     "Pick an embedding model and press ‘Run embed quality test’.":
         "Vali embedding-mudel ja vajuta ‘Käivita embed-kvaliteedi test’.",
+    "Pick a VL model and press ‘Run vision test’.":
+        "Vali VL-mudel ja vajuta ‘Käivita nägemis-test’.",
     "Pick the checks and press ‘Run model-fit test’.":
         "Vali kontrollid ja vajuta ‘Käivita model-fit test’.",
     "Set the traffic shape and press ‘Run provider-fit test’.":
@@ -453,6 +458,11 @@ INFO = {
     "emb_dur": (
         "How long to hold the load, in seconds. 15–30 s gives a stable sustained rate. The test "
         "reports embeddings/s, input tokens/s, requests/s and per-request latency over the run."),
+    "vis_model": (
+        "The vision-language (VL) model to test — one that accepts image input (e.g. a Qwen2.5-VL, "
+        "Llama-3.2-Vision, InternVL, Pixtral, LLaVA). Leave empty to use the model selected at the "
+        "top. The test sends generated images with known content and checks the answers; a text-only "
+        "model fails the first probe (image not accepted) and the rest are skipped."),
     # ---- Model fit (Openclaw / Hermes) ----
     "fit_tool": (
         "Function calling. The model is given tools via the native OpenAI `tools` "
@@ -1135,6 +1145,7 @@ class App:
         self.tab_caps = self.tabview.add(self.L("Capabilities"))
         self.tab_embed = self.tabview.add(self.L("Embed speed"))
         self.tab_embq = self.tabview.add(self.L("Embed quality"))
+        self.tab_vision = self.tabview.add(self.L("Vision"))
         self.tab_scan = self.tabview.add(self.L("Network scan"))
         self.tab_history = self.tabview.add(self.L("History"))
 
@@ -1148,6 +1159,7 @@ class App:
         self._build_capabilities_tab()
         self._build_embed_tab()
         self._build_embed_quality_tab()
+        self._build_vision_tab()
         self._build_scan_tab()
         self._build_history_tab()
         self._style_trees()
@@ -3083,6 +3095,143 @@ class App:
         self.root.clipboard_append("\n".join(lines).rstrip())
         self._set_status("Copied embed quality results to the clipboard.")
 
+    # ------------------------------------------------------------- Vision tab
+    _VIS_SYM = {"yes": "✓ pass", "no": "✗ fail", "maybe": "~ partial",
+                "error": "⚠ error", "na": "— n/a"}
+
+    def _build_vision_tab(self):
+        self.var_vis_model = tk.StringVar(value="")
+        sec, top = self._section(self.tab_vision, "Vision (VL) — does the model understand images?")
+        sec.pack(fill="x", padx=12, pady=(10, 6))
+        intro = ctk.CTkLabel(
+            top, anchor="w", justify="left", text_color=self.pal["sub"], wraplength=760,
+            text=("Sends generated images with known content — solid colours, blocky text and "
+                  "numbers, a row of squares, and two images at once — and checks the model's "
+                  "answers against ground truth. Tests real understanding (colour, OCR, counting, "
+                  "multi-image), not just whether the server accepts an image."))
+        intro.pack(fill="x", padx=12, pady=(4, 6))
+
+        def _rewrap(e, lbl=intro):
+            want = max(320, e.width - 28)
+            if abs(lbl.cget("wraplength") - want) > 12:
+                lbl.configure(wraplength=want)
+        top.bind("<Configure>", _rewrap)
+
+        row = ctk.CTkFrame(top, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(0, 4))
+        self._lbl(row, "Vision model", INFO["vis_model"]).pack(side="left", padx=(0, 6))
+        ctk.CTkEntry(row, textvariable=self.var_vis_model, width=320,
+                     placeholder_text="(uses the model selected at the top)").pack(side="left")
+
+        runbar = ctk.CTkFrame(self.tab_vision, fg_color="transparent")
+        runbar.pack(fill="x", padx=12, pady=4)
+        self.btn_vision = ctk.CTkButton(runbar, text=self.L("Run vision test"),
+                                        command=self.on_run_vision)
+        self.btn_vision.pack(side="left")
+        btn_vision_cancel = ctk.CTkButton(runbar, text=self.L("Stop"), width=80, state="disabled",
+                                          fg_color="#b04a4a", hover_color="#963c3c",
+                                          command=self.cancel_current)
+        btn_vision_cancel.pack(side="left", padx=8)
+        self._cancel_btns.append(btn_vision_cancel)
+        ctk.CTkButton(runbar, text=self.L("Copy results"), width=110,
+                      command=self.copy_vision_results).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(runbar, text="~8 image probes — needs a vision-language (VL) model.",
+                     text_color=self.pal["sub"]).pack(side="left", padx=10)
+
+        self.vision_readout = ctk.CTkLabel(
+            self.tab_vision, text=self.L("Pick a VL model and press ‘Run vision test’."),
+            anchor="w", justify="left", font=ctk.CTkFont(size=15, weight="bold"))
+        self.vision_readout.pack(fill="x", padx=16, pady=(2, 4))
+        self._vision_default_color = self.vision_readout.cget("text_color")
+
+        sec3, body = self._section(self.tab_vision, "Checks")
+        sec3.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        cols = ("feature", "status", "detail")
+        wrap, self.vision_tree = self._tree_with_scrollbars(body, cols, height=13)
+        for c, w, txt, stretch in (("feature", 260, "Check", False),
+                                   ("status", 120, "Result", False),
+                                   ("detail", 580, "Details", True)):
+            self.vision_tree.heading(c, text=txt)
+            self.vision_tree.column(c, width=w, anchor="w", stretch=stretch)
+        self.vision_tree.tag_configure("cat", background=self.pal["head_bg"],
+                                       foreground=self.pal["head_fg"])
+        self.vision_tree.tag_configure("yes", foreground=self.pal["live_ok"])
+        self.vision_tree.tag_configure("no", foreground=self.pal["live_err"])
+        self.vision_tree.tag_configure("maybe", foreground=self.pal["warn"])
+        self.vision_tree.tag_configure("error", foreground=self.pal["live_err"])
+        self.vision_tree.tag_configure("na", foreground=self.pal["sub"])
+        wrap.pack(fill="both", expand=True)
+
+    def on_run_vision(self):
+        try:
+            target = resolve_target(self.var_host.get(), self.var_port.get())
+        except ValueError as e:
+            return self._error(ValueError(f"Invalid host/port: {e}"))
+        model = self.var_vis_model.get().strip() or self._resolved_model()
+        if not model:
+            return self._error(ValueError("No model — enter a VL model or select one at the top."))
+        client = LLMClient.from_target(
+            target, api_key=self.var_apikey.get().strip() or "EMPTY",
+            timeout=float(self.var_timeout.get() or 95), endpoint=self.var_endpoint.get())
+        self._remember_endpoint(target.host, target.port)
+        self.vision_tree.delete(*self.vision_tree.get_children())
+        self._vision_report = None
+        self.vision_readout.configure(text=f"Testing {model} …",
+                                      text_color=self._vision_default_color)
+
+        def on_progress(evt):
+            self.post(lambda e=evt: self._vision_progress(e))
+
+        self.run_async(
+            B.vision_test(client, model, on_progress=on_progress),
+            self._vision_done, status="Vision test running…")
+
+    def _vision_progress(self, evt: dict):
+        kind = evt.get("event")
+        if kind == "status":
+            self._set_status(evt.get("text", "Vision test running…"))
+        elif kind == "group":
+            self.vision_tree.insert("", "end", values=(f"▸ {evt['group']}", "", ""), tags=("cat",))
+        elif kind == "item":
+            it = evt["item"]
+            self.vision_tree.insert(
+                "", "end", tags=(it["status"],),
+                values=(f"    {it['name']}", self._VIS_SYM.get(it["status"], it["status"]),
+                        it.get("detail", "")))
+            self.vision_tree.see(self.vision_tree.get_children()[-1])
+
+    def _vision_done(self, report: dict):
+        self._vision_report = report
+        GREEN, RED = ("#1c8a44", "#57c07a"), ("#b23b3b", "#e26d6d")
+        if not report.get("vision"):
+            self.vision_readout.configure(
+                text=f"NOT A VISION MODEL — {report.get('model', '?')} doesn't accept image input.",
+                text_color=RED)
+            self._set_status("Vision test complete — not a VL model.")
+            return
+        n, tot = report.get("supported", 0), report.get("total", 0)
+        self.vision_readout.configure(
+            text=f"{n} / {tot} vision checks passed   ·   model {report.get('model', '?')}",
+            text_color=GREEN if n == tot else (RED if n <= tot // 2 else self._vision_default_color))
+        self._set_status(f"Vision test complete — {n}/{tot} passed.")
+
+    def copy_vision_results(self):
+        rep = getattr(self, "_vision_report", None)
+        if not rep:
+            messagebox.showinfo(APP_TITLE, "No vision report to copy yet — run one first.")
+            return
+        lines = [f"Vision (VL) — {rep.get('model', '?')} — "
+                 f"{rep.get('supported', 0)}/{rep.get('total', 0)} passed", ""]
+        for g in rep.get("groups", []):
+            lines.append(f"== {g['group']} ==")
+            for it in g["items"]:
+                lines.append(f"  {self._VIS_SYM.get(it['status'], it['status'])}\t"
+                             f"{it['name']}\t{it.get('detail', '')}")
+            lines.append("")
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(lines).rstrip())
+        self._set_status("Copied vision results to the clipboard.")
+
     def _build_scan_tab(self):
         sec, top = self._section(self.tab_scan, "Scan settings")
         sec.pack(fill="x", padx=12, pady=10)
@@ -3556,7 +3705,8 @@ class App:
             "Capacity": self.on_run_capacity,
             "Model fit": self.on_run_modelfit, "Provider fit": self.on_run_readiness,
             "Capabilities": self.on_run_capabilities, "Embed speed": self.on_run_embed,
-            "Embed quality": self.on_run_embed_quality, "Network scan": self.on_scan,
+            "Embed quality": self.on_run_embed_quality, "Vision": self.on_run_vision,
+            "Network scan": self.on_scan,
         }
         try:
             current = self.tabview.get()
@@ -3603,7 +3753,7 @@ class App:
         state = "disabled" if busy else "normal"
         for name in ("btn_detect", "btn_models", "btn_run", "btn_scan",
                      "btn_opt", "btn_soak", "btn_capacity", "btn_fit", "btn_ready",
-                     "btn_caps", "btn_embed", "btn_embq"):
+                     "btn_caps", "btn_embed", "btn_embq", "btn_vision"):
             b = getattr(self, name, None)
             if b is not None:
                 b.configure(state=state)

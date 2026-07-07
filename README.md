@@ -50,6 +50,9 @@ rasket Qt-installi) ja lisaks boonusena käsurea-liides skriptimiseks.
   kiirust): retrieval-järjestus, parafraas-vs-mitteseotud sim, **eesti↔inglise** cross-lingual,
   vektori omadused (L2-norm, determinism, dim), sisend/batch piirid + rerank-relevantsus. Iga rida
   ✓/✗/~ + numbrid. Vt [Embed quality](#embed-quality-kas-embeddingud-töötavad).
+- 👁️ **Vision (VL)** – eraldi tab, mis **kontrollib, kas VL-mudel päriselt mõistab pilte**: saadab
+  genereeritud teadaoleva sisuga pilte (värvid, tekst/number, ruudud, mitu pilti korraga) ja võrdleb
+  vastust õige vastusega — **värvituvastus, OCR, loendamine, mitme-pildi arutlus**. Vt [Vision](#vision-vl-kas-mudel-mõistab-pilte).
 - 📊 **Testid** (Benchmark-tab):
   - **Kiirus** – latentsus (TTFT, aeg esimese tokenini) + läbilaskevõime (dekodeerimise tokenit/s).
   - **Koormustest** – N paralleelset päringut; agregeeritud tok/s ja p50/p95 latentsus.
@@ -626,6 +629,28 @@ Skann teeb ~20 kiiret päringut ja **ei tekita koormust**. Embedding-mudel on ta
 erinev — jooksuta enne **Capabilities** tab, et näha, milline mudel embed'ib. **Copy results** kopeerib
 tab-eraldatud tabeli.
 
+## Vision (VL) — kas mudel mõistab pilte
+
+**Vision**-tab kontrollib, kas **vision-language (VL) mudel päriselt mõistab pilte** — mitte ainult kas
+server aktsepteerib pilti (seda teeb Capabilities). Tester **genereerib ise teadaoleva sisuga pildid**
+(puhas Python, ilma lisasõltuvuseta) ja võrdleb mudeli vastust õige vastusega. Ideaalne 8B VL-mudelite
+(Qwen2.5-VL, Llama-3.2-Vision, InternVL, Pixtral, LLaVA) testimiseks.
+
+Kontrollid:
+
+- **Aktsepteerib pilti** — kas mudel üldse võtab pildi vastu (text-only mudel annab siin 400 ja ülejäänud
+  jäetakse vahele selge teatega "not a vision model").
+- **Värvituvastus** — kolm ühevärvilist pilti (punane/roheline/sinine), mudel peab värvi nimetama (≥2/3).
+- **Teksti lugemine (OCR)** — plokk-fondis sõna ("CAT"), mudel peab selle lugema.
+- **Numbri lugemine (OCR)** — plokk-fondis number ("42").
+- **Loendamine** — rida ruute, mudel peab need ära lugema.
+- **Mitu pilti** — kaks pilti ühes päringus, mudel peab mõlema värvi nimetama (mitme-pildi tugi).
+- **Latents** — pildi-päringu keskmine latents (VL on aeglasem).
+
+Iga rida näitab **✓ pass / ✗ fail / ~ partial** ja **mudeli tegelikku vastust**, nii et ebaõnnestumine
+on ise-diagnoosiv. VL-mudel on tavaliselt eraldi mudel — sisesta selle nimi "Vision model" väljale
+(tühjaks jättes kasutab ülal valitud mudelit). **Copy results** kopeerib tabeli.
+
 ## Eelseaded, võrdlus ja raportid
 
 ### Koormuse eelseaded
@@ -686,12 +711,13 @@ skannimine võib olla seadusevastane.
 
 ```
 llmscanner/
-├── gui.py        # Tkinter GUI (peamine) — Connection / Benchmark / Optimum finder / Soak / Capacity / Model fit / Provider fit / Capabilities / Embed speed / Embed quality / Scan / History
+├── gui.py        # Tkinter GUI (peamine) — Connection / Benchmark / Optimum finder / Soak / Capacity / Model fit / Provider fit / Capabilities / Embed speed / Embed quality / Vision / Scan / History
 ├── cli.py        # käsurea-liides (boonus, vajab rich)
 ├── client.py     # OpenAI-ühilduv async klient (http/https, base_path) + ajamõõtmine
 ├── detect.py     # serveri tuvastus / fingerprint + smart_detect (kandidaatide proovimine)
 ├── scanner.py    # võrguskann + portide tuvastus
-├── benchmark.py  # latentsus / koormus / kontekst / sanity / sweep + find_optima + soak_test + capacity_test + suitability_test (model fit) + provider_readiness + capabilities_probe + embed_speed_test + embed_quality_test
+├── testimg.py    # sõltuvusteta PNG-generaator (värvid/tekst/ruudud) Vision-testile
+├── benchmark.py  # latentsus / koormus / kontekst / sanity / sweep + find_optima + soak_test + capacity_test + suitability_test (model fit) + provider_readiness + capabilities_probe + embed_speed_test + embed_quality_test + vision_test
 ├── store.py      # SQLite püsivus: salvestatud hostid + kõik tulemused
 ├── icon.py       # rakenduse ikooni (sinine V) genereerimine
 ├── assets/

@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from . import testimg
 from .client import LLMClient
 from .models import RequestResult
 from .util import approx_tokens
@@ -2835,3 +2836,141 @@ def _rerank_top_index(res: dict):
 
 def _rerank_top_ok(res: dict) -> bool:
     return _rerank_top_index(res) == 1
+
+
+# ---------------------------------------------------------------------------
+# Vision (VL) test
+#
+# Does a vision-language model actually UNDERSTAND an image (not just accept
+# one)? Sends generated images with known content — solid colours, bitmap-font
+# text/numbers, a row of squares, and two images at once — and checks the answer
+# against ground truth. Grouped pass/fail like the other quality scans.
+# ---------------------------------------------------------------------------
+
+_NUM_WORDS = {0: "zero", 1: "one", 2: "two", 3: "three", 4: "four",
+              5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+
+
+def _answer_has(answer: str, *needles) -> bool:
+    a = (answer or "").lower()
+    return any(n.lower() in a for n in needles)
+
+
+async def vision_test(client: LLMClient, model: Optional[str], *,
+                      on_progress: Optional[Callable[[dict], None]] = None) -> dict:
+    """Probe a vision-language model's image understanding with generated,
+    ground-truth images: colour recognition, OCR (word + number), object
+    counting, and multi-image reasoning. Streams rows via `on_progress`
+    ({"event":"group"|"item"|"status"|"done"}) like the capability scan."""
+    if not model:
+        try:
+            models = await client.list_models()
+            model = models[0] if models else None
+        except Exception:
+            model = None
+        if not model:
+            raise RuntimeError("No model specified and model listing failed.")
+
+    emit = on_progress or (lambda *_: None)
+    groups: list[dict] = []
+    lat_samples: list[float] = []
+
+    def start(name):
+        g = {"group": name, "items": []}
+        groups.append(g)
+        emit({"event": "group", "group": name})
+        return g
+
+    def add(g, name, status, detail=""):
+        row = {"name": name, "status": status, "detail": detail}
+        g["items"].append(row)
+        emit({"event": "item", "group": g["group"], "item": row})
+        return row
+
+    async def ask(prompt, images, max_tokens=48):
+        r = await client.chat_image(model=model, prompt=prompt, image_urls=images,
+                                    max_tokens=max_tokens)
+        if r["ok"]:
+            lat_samples.append(r["latency"])
+        return r
+
+    def snippet(r):
+        return _raw_snippet(r.get("answer", ""))
+
+    g = start("Image understanding")
+
+    # Preflight: does the model accept an image at all? (A text-only model 400s
+    # on image content.) Gates the rest.
+    pre = await ask("Reply with the single word: ok.", [testimg.solid("red", 64)], max_tokens=8)
+    if not pre["ok"]:
+        add(g, "Accepts image input", "no",
+            f"not a vision model — {_http_short(pre['error'])}"
+            if pre["status"] else _http_short(pre["error"]))
+        for name in ("Colour recognition", "Text reading (OCR)", "Number reading (OCR)",
+                     "Object counting", "Multiple images"):
+            add(g, name, "na", "skipped — model doesn't accept images")
+        report = {"model": model, "groups": groups, "supported": 0,
+                  "total": 1, "vision": False}
+        emit({"event": "done", "report": report})
+        return report
+    add(g, "Accepts image input", "yes", "accepted an image message")
+
+    # Colour recognition — three solid colours, pass if ≥2 named correctly.
+    emit({"event": "status", "text": "colour recognition…"})
+    hits, seen = 0, []
+    for col in ("red", "green", "blue"):
+        r = await ask("What is the dominant colour of this image? Answer with one word.",
+                      [testimg.solid(col)], max_tokens=12)
+        good = r["ok"] and _answer_has(r["answer"], col)
+        hits += 1 if good else 0
+        seen.append(f"{col}→{'✓' if good else (snippet(r) if r['ok'] else 'err')}")
+    add(g, "Colour recognition", "yes" if hits >= 2 else ("maybe" if hits == 1 else "no"),
+        f"{hits}/3 correct  ({', '.join(seen)})")
+
+    # OCR — read a rendered word.
+    emit({"event": "status", "text": "text OCR…"})
+    r = await ask("What word is written in this image? Reply with just the word.",
+                  [testimg.text_image("CAT")], max_tokens=12)
+    add(g, "Text reading (OCR)", "yes" if r["ok"] and _answer_has(r["answer"], "cat") else "no",
+        "read 'CAT'" if r["ok"] and _answer_has(r["answer"], "cat")
+        else (f"model said: {snippet(r)}" if r["ok"] else _http_short(r["error"])))
+
+    # OCR — read a rendered number.
+    r = await ask("What number is shown in this image? Reply with digits only.",
+                  [testimg.text_image("42")], max_tokens=12)
+    add(g, "Number reading (OCR)", "yes" if r["ok"] and _answer_has(r["answer"], "42") else "no",
+        "read '42'" if r["ok"] and _answer_has(r["answer"], "42")
+        else (f"model said: {snippet(r)}" if r["ok"] else _http_short(r["error"])))
+
+    # Counting — a row of squares.
+    emit({"event": "status", "text": "object counting…"})
+    n = 3
+    r = await ask("How many squares are in this image? Reply with a single number.",
+                  [testimg.squares(n)], max_tokens=12)
+    good = r["ok"] and _answer_has(r["answer"], str(n), _NUM_WORDS[n])
+    add(g, "Object counting", "yes" if good else "no",
+        f"counted {n} squares" if good
+        else (f"model said: {snippet(r)}" if r["ok"] else _http_short(r["error"])))
+
+    # Multi-image — two images in one request.
+    emit({"event": "status", "text": "multi-image…"})
+    r = await ask("You are given two images. Name the colour of the first image and the "
+                  "colour of the second image.", [testimg.solid("red"), testimg.solid("blue")],
+                  max_tokens=32)
+    both = r["ok"] and _answer_has(r["answer"], "red") and _answer_has(r["answer"], "blue")
+    add(g, "Multiple images", "yes" if both else ("maybe" if r["ok"] else "no"),
+        "named both colours" if both
+        else (f"partial — model said: {snippet(r)}" if r["ok"] else _http_short(r["error"])))
+
+    if lat_samples:
+        g2 = start("Performance")
+        add(g2, "Image latency (mean)", "yes",
+            f"{1000.0 * (sum(lat_samples) / len(lat_samples)):.0f} ms/request "
+            f"over {len(lat_samples)} image calls")
+
+    supported = sum(1 for gr in groups for it in gr["items"] if it["status"] == "yes")
+    total = sum(1 for gr in groups for it in gr["items"] if it["status"] in ("yes", "no", "maybe"))
+    report = {"model": model, "groups": groups, "supported": supported,
+              "total": total, "vision": True}
+    emit({"event": "done", "report": report})
+    return report

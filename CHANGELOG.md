@@ -6,6 +6,18 @@ Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuup
 
 ## [Märgistamata]
 
+### 2026-07-07 (uus Vision-tab — VL-mudeli pildituvastus)
+- **Uus "Vision" tab (Embed quality järel)** — kontrollib, kas **vision-language (VL) mudel päriselt
+  mõistab pilte**, mitte ainult kas server aktsepteerib pilti. Tester **genereerib ise teadaoleva
+  sisuga pildid** (uus `testimg.py` — sõltuvusteta PNG-encoder + 5×7 plokk-font, ilma Pillow'ta) ja
+  võrdleb vastust õige vastusega:
+  - **Aktsepteerib pilti** (gate — text-only mudel kukub siin, ülejäänud n/a),
+    **värvituvastus** (3 värvi, ≥2/3), **teksti OCR** ("CAT"), **numbri OCR** ("42"),
+    **loendamine** (rida ruute), **mitu pilti** (kaks pilti korraga) + **latents**.
+  - Iga rida näitab mudeli tegelikku vastust, nii et ebaõnnestumine on ise-diagnoosiv.
+- Klient sai `chat_image(model, prompt, image_urls)` meetodi (multimodaalne chat-päring). Backend
+  `vision_test()`. Sobib 8B VL-mudelitele (Qwen2.5-VL, Llama-3.2-Vision, InternVL, Pixtral, LLaVA).
+
 ### 2026-07-07 (uus Embed quality -tab — kas embeddingud töötavad)
 - **Uus "Embed quality" tab (Embed speed järel)** — kontrollib embeddingute **kvaliteeti, mitte kiirust**.
   Neli rühma pass/fail-ridadega + mõõdetud numbrid:
