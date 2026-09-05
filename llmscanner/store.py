@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import time
 from pathlib import Path
 
@@ -40,7 +41,11 @@ RELEVANT = {
 def data_dir() -> Path:
     base = os.environ.get("LLMSCANNER_HOME")
     p = Path(base) if base else (Path.home() / ".llmscanner")
-    p.mkdir(parents=True, exist_ok=True)
+    # Owner-only: saved host profiles keep the API key in the clear, so neither
+    # the directory nor the database below may be world-readable. mode= applies
+    # only when the directory is created, so tighten an existing one too.
+    p.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _restrict(p, 0o700)
     return p
 
 
@@ -48,8 +53,16 @@ def db_path() -> Path:
     return data_dir() / "llmscanner.db"
 
 
+def _restrict(path: Path, mode: int) -> None:
+    """chmod `path` to `mode` if it is currently readable by anyone else."""
+    with contextlib.suppress(OSError):
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            path.chmod(mode)
+
+
 def _open() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path()), timeout=5.0)
+    path = db_path()
+    conn = sqlite3.connect(str(path), timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute(
         """CREATE TABLE IF NOT EXISTS hosts (
@@ -73,6 +86,11 @@ def _open() -> sqlite3.Connection:
         """CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY, value TEXT)"""
     )
+    # SQLite creates the file 0644 and the API keys inside it are plaintext, so
+    # tighten it here — after the CREATE TABLEs, which is what actually
+    # materialises the file on a first run.
+    _restrict(path, 0o600)
+
     # Migrate databases created before the chart columns existed.
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(results)")}
     if "value" not in cols:

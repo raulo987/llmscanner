@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 from dataclasses import dataclass
 from typing import Optional
@@ -56,6 +57,40 @@ def _looks_like_domain(host: str) -> bool:
         return False  # an IP literal is not a domain name
     except ValueError:
         return "." in host
+
+
+def is_private_host(host: str) -> bool:
+    """True when `host` is unambiguously on this machine or a local network.
+
+    Used to decide TLS verification: a local LLM server routinely has a
+    self-signed certificate, so verification has to be off to reach it at all. A
+    public host does not get that exemption — we send an API key in the
+    Authorization header, and skipping verification there would hand that key to
+    anyone able to intercept the connection.
+    """
+    h = (host or "").strip().strip("[]").lower()
+    if not h:
+        return False
+    if h == "localhost" or h.endswith((".localhost", ".local", ".lan", ".internal", ".home.arpa")):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    return bool(ip.is_private or ip.is_loopback or ip.is_link_local)
+
+
+def tls_verify_for(host: str) -> bool:
+    """Whether httpx should verify TLS certificates when talking to `host`.
+
+    Off for a private/loopback host (self-signed certs are the norm there), on
+    for anything public. `LLMSCANNER_INSECURE_TLS=1` forces it off everywhere —
+    the escape hatch for a public host with a self-signed certificate. Nothing
+    can turn verification off for a public host implicitly.
+    """
+    if os.environ.get("LLMSCANNER_INSECURE_TLS", "").strip().lower() in ("1", "true", "yes"):
+        return False
+    return not is_private_host(host)
 
 
 def _clean_base_path(path: str) -> str:
@@ -174,18 +209,39 @@ def approx_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+MAX_PORT = 65535
+MAX_SCAN_PORTS = 4096   # a scan opens a socket per (host, port) — keep it sane
+
+
 def parse_ports(spec: str, default: list[int]) -> list[int]:
-    """Parse '8000,8080,30000' or '8000-8010' into a list of ints."""
+    """Parse '8000,8080,30000' or '8000-8010' into a list of ports.
+
+    Every port is validated against 1..65535 and the total is capped: a typo
+    like '1-5000000' would otherwise build a multi-million entry list and then
+    try to open that many sockets, wedging the scan.
+    """
     if not spec:
         return list(default)
+
+    def one(tok: str) -> int:
+        n = int(tok)
+        if not 1 <= n <= MAX_PORT:
+            raise ValueError(f"port {n} is outside 1..{MAX_PORT}")
+        return n
+
     out: list[int] = []
     for part in spec.split(","):
         part = part.strip()
         if not part:
             continue
-        if "-" in part:
+        if "-" in part.lstrip("-"):
             a, b = part.split("-", 1)
-            out.extend(range(int(a), int(b) + 1))
+            lo, hi = one(a.strip()), one(b.strip())
+            if lo > hi:
+                raise ValueError(f"port range {lo}-{hi} runs backwards")
+            out.extend(range(lo, hi + 1))
         else:
-            out.append(int(part))
+            out.append(one(part))
+        if len(out) > MAX_SCAN_PORTS:
+            raise ValueError(f"too many ports ({len(out)}); the limit is {MAX_SCAN_PORTS}")
     return out

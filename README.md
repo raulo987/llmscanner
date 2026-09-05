@@ -27,8 +27,8 @@ install needed) and, as a bonus, a command-line interface for scripting.
 - 🎯 **Optimum finder** – a separate tab that **automatically finds the optimal concurrency and the
   largest workable request size**. See [Optimum finder](#optimum-finder).
 - ⏳ **Soak test** – holds a fixed load for N minutes and measures **sustained tokens in/out per
-  hour** (and whether throughput stays stable). Supports replaying **TheEye's real workload**.
-  See [Soak test](#soak-test).
+  hour** (and whether throughput stays stable). Supports replaying a **real production
+  workload mix**. See [Soak test](#soak-test).
 - 🚀 **Capacity** – a separate tab that **ramps concurrency in steps (1→2→4→…)** and finds the **peak
   sustained tokens/minute** — the endpoint's capacity **ceiling** and its saturation point. Optional
   **Target tok/min → PASS/FAIL**. See [Capacity](#capacity-tokmin-ceiling).
@@ -183,8 +183,13 @@ The host field no longer has to be a bare IP — the app works out how to reach 
 
 **The rules in short:** a scheme/port/path inside the host string always beats the port field. A bare
 public domain defaults to HTTPS (443) — the port field is meant for the local-server workflow. A local
-IP / `localhost` uses HTTP on the port field. Certificate verification is disabled so local servers
-with self-signed TLS certs work.
+IP / `localhost` uses HTTP on the port field.
+
+**TLS verification** is skipped only for a private or loopback host, where a self-signed certificate
+is the norm. Against a public host it stays **on**: every request carries your API key in an
+`Authorization` header, and an unverified connection would expose that key to anyone able to
+intercept it. Set `LLMSCANNER_INSECURE_TLS=1` if you really do need to reach a public host with a
+self-signed certificate.
 
 **"Detect server"** does not assume the right scheme: it tries the derived candidates in order
 (e.g. `https://host` → `http://host` → `http://host:<port>`) and picks the first that answers; the
@@ -344,13 +349,17 @@ number of requests and finish), the soak test **holds a fixed concurrency for a 
 - Output length is forced with `ignore_eos`; **raise Timeout for large outputs.**
 - A run can be interrupted with **Stop** (the last numbers stay on screen).
 
-**TheEye workload (optional):** instead of a fixed request size it **replays TheEye's real
-production traffic** — every request picks a task (weighted by the real call frequency: classification,
-social_image_understand, extraction, entity_update and so on) and samples the input/output token
-counts from that task's measured distribution (a lognormal fit to the mean/p95). That gives you a
-**realistic sustained tokens/hour** figure for your actual workload (mostly short structured calls,
-~1.3k in / ~150 out, plus the occasional heavy entity generation). The input/output fields are
+**Production workload (optional):** instead of a fixed request size it **replays a real
+production traffic mix** — every request picks a task (weighted by that task's share of calls:
+classify, understand, extract, profile update and so on) and samples the input/output token counts
+from that task's measured distribution (a lognormal fit to the mean/p95). That gives you a
+**realistic sustained tokens/hour** figure for a mixed workload (mostly short structured calls,
+~1.3k in / ~150 out, plus the occasional heavy generation job). The input/output fields are
 ignored — you only change **the duration and the concurrency**.
+
+The bundled mix is `PRODUCTION_TASKS` in `benchmark.py`, measured from a live analysis pipeline.
+**Replace that table with your own measurements** to soak-test against your traffic rather than the
+sample.
 
 **Overload probe (+10%, on by default):** runs **10% above the concurrency limit** (e.g. 64 → 72) to
 check **admission control** — does the server reject the surplus requests properly (like OpenRouter /
@@ -768,5 +777,9 @@ next launch. Switching language rebuilds the tabs — it is not done while a tes
 Saved hosts, all test results and the settings (theme, language) are kept in
 `~/.llmscanner/llmscanner.db` (SQLite). The location can be changed with the `LLMSCANNER_HOME`
 environment variable.
+
+A saved host profile stores its **API key in the clear**, so the directory is created `0700` and the
+database file `0600` (owner only) — an existing directory left more permissive is tightened on the
+next run.
 
 The change history is in [CHANGELOG.md](CHANGELOG.md).

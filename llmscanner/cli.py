@@ -34,7 +34,11 @@ def _table(title, rows):
 
 async def cmd_scan(args):
     subnet = args.subnet or default_subnet()
-    ports = parse_ports(args.ports, DEFAULT_PORTS)
+    try:
+        ports = parse_ports(args.ports, DEFAULT_PORTS)
+    except ValueError as e:
+        console.print(f"[red]Invalid --ports:[/red] {e}")
+        return 2
     console.print(f"[bold]Scanning[/bold] {subnet} on {len(ports)} ports …")
     pairs = await scan_network(subnet, ports, timeout=args.timeout, concurrency=args.concurrency)
     if not pairs:
@@ -184,10 +188,14 @@ def main():
 
     args = p.parse_args()
     try:
-        asyncio.run(args.func(args))
+        # A command returns a non-zero int to signal failure (bad arguments, …);
+        # the console-script wrapper turns whatever main() returns into the exit
+        # code, so it has to be propagated rather than dropped.
+        return asyncio.run(args.func(args)) or 0
     except KeyboardInterrupt:
         console.print("\n[dim]Interrupted.[/dim]")
+        return 130
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

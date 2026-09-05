@@ -4,7 +4,7 @@ from __future__ import annotations
 import httpx
 
 from .models import ServerInfo
-from .util import Target, candidate_targets
+from .util import Target, candidate_targets, tls_verify_for
 
 
 async def _get(client: httpx.AsyncClient, url: str):
@@ -47,8 +47,10 @@ async def detect_target(target: Target, timeout: float = 4.0) -> ServerInfo:
     base = target.base_url
     headers = {"Authorization": "Bearer EMPTY"}
 
-    # verify=False: local LLM servers commonly use self-signed TLS certs.
-    async with httpx.AsyncClient(timeout=timeout, headers=headers, verify=False) as c:
+    # Verification off only for a private/loopback host (self-signed certs are the
+    # norm there); on for anything public. See util.tls_verify_for.
+    verify = tls_verify_for(target.host)
+    async with httpx.AsyncClient(timeout=timeout, headers=headers, verify=verify) as c:
         # 1) OpenAI-compatible model list — the common denominator.
         server_hdr = ""
         r = await _get(c, f"{base}/v1/models")

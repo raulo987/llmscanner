@@ -19,7 +19,7 @@ def _is_transient(error: str) -> bool:
                                 "ReadError", "PoolTimeout", "WriteTimeout", "TimeoutException"))
 
 from .models import RequestResult
-from .util import Target, approx_tokens
+from .util import Target, approx_tokens, tls_verify_for
 
 
 def _extract_error(obj) -> str:
@@ -107,11 +107,15 @@ class LLMClient:
                    base_path=target.base_path, **kwargs)
 
     def _http(self, **kwargs) -> httpx.AsyncClient:
-        # verify=False: local LLM servers commonly use self-signed TLS certs.
+        # TLS verification is skipped only for a private/loopback host, where a
+        # self-signed certificate is the norm. Against a public host it stays ON:
+        # every request carries the API key in an Authorization header, and an
+        # unverified connection would expose that key to interception. Set
+        # LLMSCANNER_INSECURE_TLS=1 to override (see util.tls_verify_for).
         # setdefault (not explicit kwargs) so a caller can override timeout/verify
         # without triggering a "multiple values for keyword argument" TypeError.
         kwargs.setdefault("timeout", self.timeout)
-        kwargs.setdefault("verify", False)
+        kwargs.setdefault("verify", tls_verify_for(self.host))
         return httpx.AsyncClient(**kwargs)
 
     def _headers(self) -> dict:

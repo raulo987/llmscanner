@@ -171,7 +171,7 @@ def _help_text(lang: str) -> str:
             "• Connection — sisesta host/port, ‘Detect server’ tuvastab serveri ja mudelid.\n"
             "• Benchmark — kiirus, latents, läbilaskevõime, kontekst, sanity, sweep, determinism, limits.\n"
             "• Optimum finder — leiab automaatselt parima paralleelsuse ja suurima päringusuuruse.\n"
-            "• Soak — hoiab püsivat koormust ja mõõdab tokeneid tunnis (+ TheEye päris-koormus).\n"
+            "• Soak — hoiab püsivat koormust ja mõõdab tokeneid tunnis (+ päris tootmiskoormus).\n"
             "• Model fit — kas mudel sobib agentseks kasutuseks (Hermes tööriistad, JSON, juhised).\n"
             "• Provider fit — kas backend kannatab OpenRouter/HuggingFace liiklust; API-leping, aususe-\n"
             "  testid (token-loendus, kontekst, kvaliteet), pudelikaela-analüüs, verdikt.\n"
@@ -200,7 +200,7 @@ def _help_text(lang: str) -> str:
         "• Connection — enter host/port; ‘Detect server’ fingerprints the server and lists models.\n"
         "• Benchmark — speed, latency, throughput, context, sanity, sweep, determinism, limits.\n"
         "• Optimum finder — auto-finds the best concurrency and largest working request size.\n"
-        "• Soak — holds sustained load and measures tokens/hour (+ TheEye real workload).\n"
+        "• Soak — holds sustained load and measures tokens/hour (+ a real production workload).\n"
         "• Model fit — whether a model suits agentic use (Hermes tools, JSON, instructions).\n"
         "• Provider fit — whether a backend can serve OpenRouter/HuggingFace traffic: API contract,\n"
         "  integrity probes (token counting, context, quality), bottleneck analysis, verdict.\n"
@@ -397,14 +397,16 @@ INFO = {
         "Give each request a unique preamble so a prefix-affinity gateway spreads the load "
         "across all backends (essential for a multi-machine cluster — otherwise it pins to "
         "one). Keep on unless you deliberately want single-backend numbers."),
-    "soak_theeye": (
-        "Replay the real TheEye production traffic mix instead of one fixed request size. "
-        "Each request samples a task type (weighted by its real call rate — classification, "
-        "social_image_understand, extraction, entity_update, …) and draws input/output token "
-        "counts from that task's measured distribution (lognormal fit to mean/p95).\n\n"
-        "This gives a realistic sustained tokens/hour for your actual workload — mostly short "
-        "structured calls (~1.3k in / ~150 out) with an occasional heavy entity generation. "
-        "The Input/Output token fields are ignored; you only set duration and concurrency."),
+    "soak_workload": (
+        "Replay a real production traffic mix instead of one fixed request size. Each request "
+        "samples a task type (weighted by its share of calls — classify, understand, extract, "
+        "profile update, …) and draws input/output token counts from that task's measured "
+        "distribution (lognormal fit to mean/p95).\n\n"
+        "This gives a realistic sustained tokens/hour for a mixed workload — mostly short "
+        "structured calls (~1.3k in / ~150 out) with an occasional heavy generation job. The "
+        "Input/Output token fields are ignored; you only set duration and concurrency.\n\n"
+        "The mix lives in PRODUCTION_TASKS (benchmark.py) — replace that table with your own "
+        "measurements to soak-test against your traffic rather than the bundled sample."),
     "soak_overload": (
         "Run at 10% ABOVE the Concurrency (e.g. 64 → 72) to test admission control: a good "
         "gateway (OpenRouter, HuggingFace, a well-configured vLLM) rejects the overflow "
@@ -1735,7 +1737,7 @@ class App:
         self.var_soak_dur = tk.StringVar(value="30")
         self.var_soak_distinct = tk.BooleanVar(value=True)
         self.var_soak_overload = tk.BooleanVar(value=True)
-        self.var_soak_theeye = tk.BooleanVar(value=False)
+        self.var_soak_workload = tk.BooleanVar(value=False)
 
         sec, top = self._section(self.tab_soak, "Sustained throughput (tokens / hour)")
         sec.pack(fill="x", padx=12, pady=(10, 6))
@@ -1761,10 +1763,10 @@ class App:
         self._info_icon(fr2, "Overload probe", INFO["soak_overload"]).pack(side="left", padx=(5, 0))
         fr3 = ctk.CTkFrame(top, fg_color="transparent")
         fr3.grid(row=4, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 4))
-        ctk.CTkCheckBox(fr3, text="TheEye workload — replay the real production traffic mix "
+        ctk.CTkCheckBox(fr3, text="Production workload — replay a real production traffic mix "
                                   "(input/output fields ignored; only time & concurrency apply)",
-                        variable=self.var_soak_theeye).pack(side="left")
-        self._info_icon(fr3, "TheEye workload", INFO["soak_theeye"]).pack(side="left", padx=(5, 0))
+                        variable=self.var_soak_workload).pack(side="left")
+        self._info_icon(fr3, "Production workload", INFO["soak_workload"]).pack(side="left", padx=(5, 0))
 
         runbar = ctk.CTkFrame(self.tab_soak, fg_color="transparent")
         runbar.pack(fill="x", padx=12, pady=4)
@@ -1820,10 +1822,10 @@ class App:
             overload = bool(self.var_soak_overload.get())
             # +10% concurrency (at least one extra request) to probe admission control.
             eff_conc = max(base_conc + 1, round(base_conc * 1.1)) if overload else base_conc
-            theeye = bool(self.var_soak_theeye.get())
+            workload = bool(self.var_soak_workload.get())
             cfg = {
                 "base_conc": base_conc, "overload": overload, "concurrency": eff_conc,
-                "theeye": theeye,
+                "workload": workload,
                 "ctx_tokens": max(1, int(self.var_soak_in.get())),
                 "gen_tokens": max(1, int(self.var_soak_out.get())),
                 "duration_s": max(1.0, float(self.var_soak_dur.get()) * 60.0),
@@ -1836,7 +1838,7 @@ class App:
         self._soak_target_out = cfg["gen_tokens"]
         self._soak_base_conc = cfg["base_conc"]
         self._soak_overload = cfg["overload"]
-        self._soak_theeye = cfg["theeye"]
+        self._soak_workload = cfg["workload"]
         client = LLMClient.from_target(
             target, api_key=self.var_apikey.get().strip() or "EMPTY",
             timeout=cfg["timeout"], endpoint=self.var_endpoint.get())
@@ -1846,12 +1848,13 @@ class App:
         mins = cfg["duration_s"] / 60.0
         cdesc = (f"c={cfg['concurrency']} (base {cfg['base_conc']} +10% overload probe)"
                  if cfg["overload"] else f"c={cfg['concurrency']}")
-        wdesc = "TheEye workload mix" if cfg["theeye"] else f"in {cfg['ctx_tokens']} / out {cfg['gen_tokens']} tok"
+        wdesc = ("production workload mix" if cfg["workload"]
+                 else f"in {cfg['ctx_tokens']} / out {cfg['gen_tokens']} tok")
         self.soak_log.write(f"▶ Soak · {client.base_url}", "head")
         self.soak_log.write(f"        {cdesc} · {wdesc} · {mins:g} min", "dim")
         self.soak_readout.configure(text=f"Starting… {cdesc}, {wdesc}, {mins:g} min")
 
-        sampler = B.theeye_sample if cfg["theeye"] else None
+        sampler = B.workload_sample if cfg["workload"] else None
 
         def on_progress(snap):
             self.post(lambda s=snap: self._soak_progress(s))
@@ -1921,7 +1924,7 @@ class App:
              ("latency p50 / p95 (s)", f"{s['lat_p50']:.2f} / {s['lat_p95']:.2f}"),
              ("mean in/out tok/req",
               f"{(s['in_tokens'] / s['success']) if s['success'] else 0:.0f} / {s['gen_actual']:.0f}"
-              + (f" (requested {s['req_out_mean']:.0f})" if getattr(self, '_soak_theeye', False)
+              + (f" (requested {s['req_out_mean']:.0f})" if getattr(self, '_soak_workload', False)
                  else f" / {getattr(self, '_soak_target_out', '?')}")),
              ("under-gen requests", f"{s['undergen_frac'] * 100:.1f}%"),
              ("rejected (429/503)", f"{s['rejected']} ({s['rejected_frac'] * 100:.1f}%)"),

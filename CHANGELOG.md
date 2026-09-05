@@ -6,6 +6,33 @@ Current version: **0.1.0** (no releases tagged yet; entries are by date below).
 
 ## [Unreleased]
 
+### 2026-09-06 (English throughout; TLS, key storage and port-parsing fixes)
+- **The docs and the last Estonian strings are now English.** README.md and CHANGELOG.md are fully
+  translated (internal anchors updated and verified). The verdict strings returned by
+  `_suitability_verdict` / `_rd_verdict` were Estonian **regardless of the language setting** — they
+  are rendered directly, not through `tr()`, so an English UI showed SOBIB / PIIRIPEAL / EI SOBI for
+  Model fit and Provider fit. They are now **FIT / BORDERLINE / NOT FIT**. The app's Estonian locale
+  (`LANG` / `TR_ET` / `_help_text`) is untouched, as is `_ML_ET` — the Estonian half of the
+  cross-lingual embedding probe, whose whole point is to be in another language.
+- **TLS verification is no longer disabled everywhere.** `verify=False` was unconditional, which was
+  right for a local server with a self-signed certificate and wrong for a public host: every request
+  carries the API key in an `Authorization` header, so an unverified connection exposed that key to
+  interception. Verification is now off only for a private/loopback host (`util.tls_verify_for`) and
+  on for anything public; `LLMSCANNER_INSECURE_TLS=1` overrides it.
+- **Saved API keys are no longer world-readable.** `~/.llmscanner` was created `0755` and its SQLite
+  file `0644`, while a saved host profile keeps its API key in the clear — any other user on the
+  machine could read them. The directory is now `0700` and the database `0600`, and an existing
+  directory left more permissive is tightened on the next run.
+- **`parse_ports` validates and bounds its input.** It accepted any integer and any range, so a typo
+  such as `1-5000000` built a five-million entry list and then tried to open that many sockets. Ports
+  are now checked against 1..65535, a backwards range is rejected, and the total is capped at 4096.
+  `llmscanner-cli scan` catches the resulting error and exits 2 instead of printing a traceback, and
+  `main()` now propagates command exit codes.
+- **The soak workload mix is no longer named after one customer.** `THEEYE_TASKS` → `PRODUCTION_TASKS`
+  with generic task names and shares of calls instead of absolute call counts; `theeye_sample()` →
+  `workload_sample()`; the checkbox now reads "Production workload". The distributions — and so the
+  behaviour — are unchanged, and the docs now point at the table for swapping in your own workload.
+
 ### 2026-07-07 (new Vision tab — image understanding in a VL model)
 - **New "Vision" tab (after Embed quality)** — checks whether a **vision-language (VL) model really
   understands images**, not merely whether the server accepts one. The tester **generates images with
@@ -280,7 +307,7 @@ Current version: **0.1.0** (no releases tagged yet; entries are by date below).
 
 ### 2026-07-03
 - **Soak test** — a new tab: holds a sustained load for N minutes and measures **tokens per hour**;
-  supports replaying **TheEye's** real workload and an **overload probe** (+10%, admission control).
+  supports replaying a real production workload mix and an **overload probe** (+10%, admission control).
 - Marking token counts as estimated when the server sends no usage block.
 - Marking under-generation when the server ignores `ignore_eos`.
 - Defaults: concurrency ceiling 64, requests-per-worker 2, max-context ceiling 65536, settle pause 3 s.

@@ -665,24 +665,29 @@ async def find_optima(client: LLMClient, model: Optional[str], *,
 # --------------------------------------------------------------------------- #
 
 # --------------------------------------------------------------------------- #
-#  TheEye — a real production workload mix (per-task call rate + in/out sizes)
+#  A real production workload mix (per-task share of calls + in/out sizes)
 # --------------------------------------------------------------------------- #
 
-# (task, calls_per_30min, (in mean, in p95, in max), (out mean, out p95, out max))
-THEEYE_TASKS = [
-    ("classification",          108842, (1159, 3323, 11906), (117, 145, 2048)),
-    ("social_image_understand", 103973, (1266, 3401, 16495), (135, 215, 517)),
-    ("extraction",               77051, (3608, 6609, 12633), (809, 1954, 8192)),
-    ("causal_relevance",         42063, (265, 290, 366),      (42, 60, 512)),
-    ("signal_relevance_batch",   42047, (2245, 2744, 3432),   (239, 789, 4096)),
-    ("nvc_analysis",             41966, (4030, 4296, 5519),   (398, 913, 5000)),
-    ("delphi",                   45000, (1350, 1700, 2100),   (435, 780, 2500)),
-    ("extraction_entity",        11198, (2817, 6393, 11136),  (693, 2904, 4096)),
-    ("extraction_semantic",      11125, (3688, 7344, 12008),  (214, 533, 8192)),
-    ("entity_profile_full",       5947, (2752, 4486, 6169),   (1249, 1717, 3018)),
-    ("entity_update",             2638, (4877, 6147, 7505),   (1544, 2293, 5000)),
+# Measured from a live LLM application: an analysis pipeline whose traffic is
+# dominated by short structured calls (classify / understand / extract) with an
+# occasional heavy entity-generation job. Replace the table with your own
+# measurements to soak-test against your workload rather than this one.
+#
+# (task, share of calls %, (in mean, in p95, in max), (out mean, out p95, out max))
+PRODUCTION_TASKS = [
+    ("short_classify",   22.1, (1159, 3323, 11906), (117, 145, 2048)),
+    ("image_understand", 21.1, (1266, 3401, 16495), (135, 215, 517)),
+    ("extract",          15.7, (3608, 6609, 12633), (809, 1954, 8192)),
+    ("forecast",          9.1, (1350, 1700, 2100),  (435, 780, 2500)),
+    ("relevance_short",   8.6, (265, 290, 366),     (42, 60, 512)),
+    ("relevance_batch",   8.5, (2245, 2744, 3432),  (239, 789, 4096)),
+    ("analysis_medium",   8.5, (4030, 4296, 5519),  (398, 913, 5000)),
+    ("extract_entity",    2.3, (2817, 6393, 11136), (693, 2904, 4096)),
+    ("extract_semantic",  2.3, (3688, 7344, 12008), (214, 533, 8192)),
+    ("profile_full",      1.2, (2752, 4486, 6169),  (1249, 1717, 3018)),
+    ("profile_update",    0.5, (4877, 6147, 7505),  (1544, 2293, 5000)),
 ]
-_THEEYE_WEIGHTS = [t[1] for t in THEEYE_TASKS]
+_WORKLOAD_WEIGHTS = [t[1] for t in PRODUCTION_TASKS]
 
 
 def _lognorm_sample(mean: float, p95: float, hard_max: float) -> int:
@@ -704,10 +709,11 @@ def _lognorm_sample(mean: float, p95: float, hard_max: float) -> int:
     return int(min(max(1, round(v)), hard_max))
 
 
-def theeye_sample() -> tuple:
-    """Sample one (input_tokens, output_tokens) request from the TheEye mix —
-    weighted by each task's call rate, sized from its in/out distribution."""
-    _n, _w, (im, ip, ix), (om, op, ox) = random.choices(THEEYE_TASKS, weights=_THEEYE_WEIGHTS, k=1)[0]
+def workload_sample() -> tuple:
+    """Sample one (input_tokens, output_tokens) request from the production mix —
+    weighted by each task's share of calls, sized from its in/out distribution."""
+    _n, _w, (im, ip, ix), (om, op, ox) = random.choices(PRODUCTION_TASKS,
+                                                        weights=_WORKLOAD_WEIGHTS, k=1)[0]
     return _lognorm_sample(im, ip, ix), _lognorm_sample(om, op, ox)
 
 
@@ -768,7 +774,7 @@ async def soak_test(client: LLMClient, model: Optional[str], *, concurrency: int
 
     async def worker():
         while time.perf_counter() < deadline:
-            # A sampler (e.g. the TheEye workload mix) picks a realistic (in, out)
+            # A sampler (e.g. the production workload mix) picks a realistic (in, out)
             # size per request; otherwise every request is the fixed configured size.
             in_toks, out_toks = sampler() if sampler else (ctx_tokens, gen_tokens)
             r = await client.generate(model=model, prompt=build_body(in_toks),
