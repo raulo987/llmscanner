@@ -2161,7 +2161,7 @@ class App:
             top, anchor="w", justify="left", text_color=self.pal["sub"],
             text=("Runs a battery of capability probes and grades whether the model is fit "
                   "for agentic use (native tool-calling, with a Hermes-prompt fallback). "
-                  "Verdict: SOBIB / PIIRIPEAL / EI SOBI."))
+                  "Verdict: FIT / BORDERLINE / NOT FIT."))
         intro.grid(row=0, column=0, columnspan=4, sticky="w", padx=12, pady=(4, 6))
 
         def check(r, label, var, info):
@@ -2402,7 +2402,7 @@ class App:
             text=("Checks the API contract routers require (streaming, usage accounting, "
                   "max_tokens/stop, deterministic decode, sampling params, clean errors), "
                   "then sweeps concurrency to find the throughput knee and the first "
-                  "bottleneck. Verdict: SOBIB / PIIRIPEAL / EI SOBI per provider."))
+                  "bottleneck. Verdict: FIT / BORDERLINE / NOT FIT per provider."))
         intro.grid(row=0, column=0, columnspan=6, sticky="ew", padx=12, pady=(4, 8))
 
         # Keep the intro wrapping to the actual pane width as the window resizes

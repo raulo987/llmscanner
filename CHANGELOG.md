@@ -1,275 +1,292 @@
-# Muudatuste logi
+# Changelog
 
-Kõik märkimisväärsed muudatused selles projektis. Vorming järgib
-[Keep a Changelog](https://keepachangelog.com/) põhimõtteid.
-Praegune versioon: **0.1.0** (väljalaskeid pole veel märgistatud; allpool kuupäeva järgi).
+All notable changes to this project. The format follows the
+[Keep a Changelog](https://keepachangelog.com/) principles.
+Current version: **0.1.0** (no releases tagged yet; entries are by date below).
 
-## [Märgistamata]
+## [Unreleased]
 
-### 2026-07-07 (uus Vision-tab — VL-mudeli pildituvastus)
-- **Uus "Vision" tab (Embed quality järel)** — kontrollib, kas **vision-language (VL) mudel päriselt
-  mõistab pilte**, mitte ainult kas server aktsepteerib pilti. Tester **genereerib ise teadaoleva
-  sisuga pildid** (uus `testimg.py` — sõltuvusteta PNG-encoder + 5×7 plokk-font, ilma Pillow'ta) ja
-  võrdleb vastust õige vastusega:
-  - **Aktsepteerib pilti** (gate — text-only mudel kukub siin, ülejäänud n/a),
-    **värvituvastus** (3 värvi, ≥2/3), **teksti OCR** ("CAT"), **numbri OCR** ("42"),
-    **loendamine** (rida ruute), **mitu pilti** (kaks pilti korraga) + **latents**.
-  - Iga rida näitab mudeli tegelikku vastust, nii et ebaõnnestumine on ise-diagnoosiv.
-- Klient sai `chat_image(model, prompt, image_urls)` meetodi (multimodaalne chat-päring). Backend
-  `vision_test()`. Sobib 8B VL-mudelitele (Qwen2.5-VL, Llama-3.2-Vision, InternVL, Pixtral, LLaVA).
+### 2026-07-07 (new Vision tab — image understanding in a VL model)
+- **New "Vision" tab (after Embed quality)** — checks whether a **vision-language (VL) model really
+  understands images**, not merely whether the server accepts one. The tester **generates images with
+  known content itself** (a new `testimg.py` — a dependency-free PNG encoder + a 5×7 block font, no
+  Pillow) and compares the answer against the truth:
+  - **Accepts an image** (a gate — a text-only model fails here and the rest are n/a),
+    **colour recognition** (3 colours, ≥2/3), **text OCR** ("CAT"), **number OCR** ("42"),
+    **counting** (a row of squares), **multiple images** (two at once) + **latency**.
+  - Every row shows the model's actual answer, so a failure is self-diagnosing.
+- The client gained a `chat_image(model, prompt, image_urls)` method (a multimodal chat request).
+  Backend: `vision_test()`. Suits 8B VL models (Qwen2.5-VL, Llama-3.2-Vision, InternVL, Pixtral, LLaVA).
 
-### 2026-07-07 (uus Embed quality -tab — kas embeddingud töötavad)
-- **Uus "Embed quality" tab (Embed speed järel)** — kontrollib embeddingute **kvaliteeti, mitte kiirust**.
-  Neli rühma pass/fail-ridadega + mõõdetud numbrid:
-  - **Retrieval & sarnasus:** retrieval-järjestus (õige dokument saab kõrgeima cosine-sim'i),
-    parafraas-vs-mitteseotud sim, **eesti↔inglise cross-lingual** joondus.
-  - **Vektori omadused:** L2-normaliseeritus (‖v‖≈1), determinism (sama tekst → identne vektor), dimensioon.
-  - **Piirid:** max sisend-pikkus (kärpimise/vea punkt) ja max batch-suurus.
-  - **Rerank** (kui `/v1/rerank` olemas): relevantsus — kas reranker paneb õige dokumendi esimeseks;
-    kui embedding-mudel pole reranker, otsitakse automaatselt rerank-nimelist mudelit.
-- Preflight embed + selge veateade chat-mudeli valimisel. Copy results kopeerib tab-eraldatud tabeli.
-- Klient: `embed(..., keep_vectors=True)` tagastab ka vektorid; backend `embed_quality_test()` +
-  cosine/rerank-abifunktsioonid.
+### 2026-07-07 (new Embed quality tab — do the embeddings work)
+- **New "Embed quality" tab (after Embed speed)** — checks the **quality of the embeddings, not their
+  speed**. Four groups of pass/fail rows plus the measured numbers:
+  - **Retrieval & similarity:** retrieval ranking (the right document gets the highest cosine
+    similarity), paraphrase-vs-unrelated similarity, **Estonian↔English cross-lingual** alignment.
+  - **Vector properties:** L2 normalisation (‖v‖≈1), determinism (the same text → an identical
+    vector), dimension.
+  - **Limits:** max input length (the truncation/error point) and max batch size.
+  - **Rerank** (when `/v1/rerank` exists): relevance — does the reranker put the right document first;
+    if the embedding model is not a reranker, a rerank-sounding model is looked up automatically.
+- A preflight embed plus a clear error message when a chat model is picked. Copy results copies the
+  table tab-separated.
+- Client: `embed(..., keep_vectors=True)` also returns the vectors; backend `embed_quality_test()` +
+  cosine/rerank helpers.
 
-### 2026-07-07 (uus Embed speed -tab — embedding-mudeli jõudlus)
-- **Uus "Embed speed" tab (Capabilities järel)** — mõõdab embedding-mudeli **läbilaskevõimet ja
-  kiirust**: hoiab `concurrency` batch-päringut (igas `batch_size` teksti ~`input_tokens` tokenit)
-  `/v1/embeddings` otspunkti vastu `duration_s` sekundit ja raporteerib **embeddings/s, sisend-tokenit/s,
-  req/s, vektori dimensiooni** ja latentsi **p50/p95** + ms/embedding. Reaalajas graafik (emb/s ajas).
-- **Batch-suurus on eraldi nupp** (embedding-serverid batch'ivad efektiivselt — suurem batch = rohkem
-  emb/s). **Preflight** embed kinnitab enne testi, et mudel päriselt embed'ib; chat-mudeli valimisel
-  peatub test selge teatega. "Embedding model" väli (tühi → kasutab ülal valitud mudelit), kuna
-  embedding-mudel on tavaliselt chat-mudelist erinev.
-- Klient sai `embed(model, inputs)` ajastatud meetodi (dim + usage-tokenid); backend `embed_speed_test()`.
+### 2026-07-07 (new Embed speed tab — embedding model performance)
+- **New "Embed speed" tab (after Capabilities)** — measures an embedding model's **throughput and
+  speed**: it holds `concurrency` batch requests (each with `batch_size` texts of ~`input_tokens`
+  tokens) against the `/v1/embeddings` endpoint for `duration_s` seconds and reports **embeddings/s,
+  input tokens/s, req/s, the vector dimension** and latency **p50/p95** + ms/embedding. Live chart
+  (emb/s over time).
+- **Batch size is its own knob** (embedding servers batch efficiently — a bigger batch = more emb/s).
+  A **preflight** embed confirms before the test that the model really embeds; picking a chat model
+  stops the test with a clear message. An "Embedding model" field (empty → uses the model selected
+  above), since the embedding model is usually different from the chat model.
+- The client gained a timed `embed(model, inputs)` method (dim + usage tokens); backend
+  `embed_speed_test()`.
 
-### 2026-07-07 (Capabilities: täpsem JSON-režiimi tuvastus + puhastus)
-- **JSON schema tuvastus ei anna enam valet "yes"-i** — server, mis `response_format`'i vaikselt
-  ignoreerib (tagastab proosa), näitas varem "yes", kui väljund juhtus JSON olema. Nüüd kasutab
-  loomulikku prompti + **kontrollib, kas väljund vastab nõutud skeemile** (city + population); ainult
-  siis "yes" ("enforced the schema"), muidu "no". Chat-feature proovid saadavad nüüd `stream:false`
-  (voogedastav server ei riku enam JSON-parse'i). Eemaldatud liiane haru `_json_probe_row`-is.
+### 2026-07-07 (Capabilities: more accurate JSON-mode detection + cleanup)
+- **JSON schema detection no longer returns a false "yes"** — a server that silently ignores
+  `response_format` (returning prose) used to show "yes" whenever the output happened to be JSON. It
+  now uses a natural prompt and **checks that the output matches the required schema** (city +
+  population); only then "yes" ("enforced the schema"), otherwise "no". The chat-feature probes now
+  send `stream:false` (a streaming server no longer breaks the JSON parse). Removed a redundant branch
+  in `_json_probe_row`.
 
-### 2026-07-07 (Capabilities: embeddings proovib kõiki router-mudeleid)
-- **Embeddings-proov proovib nüüd mitut mudelit** — kui valitud (chat)mudel ei embed'i, käib skann
-  automaatselt läbi teised `/v1/models` all olevad mudelid (embedding-nimelised nagu bge/e5/gte/nomic
-  esimesena) ja raporteerib, **kas mõni neist embed'ib ja millise mudeliga** (kuni 12 mudelit). Nii
-  saab mitme-mudeliga routeri puhul (nt apirouter) ühe skanniga vastuse "kas embeddings üldse töötab".
-  Tulemus eristab: ✓ *via model X (dim N)* / ✗ *route present, no embedding model found* / ✗ *no route*.
+### 2026-07-07 (Capabilities: embeddings tries every router model)
+- **The embeddings probe now tries several models** — if the selected (chat) model does not embed, the
+  scan automatically walks the other models under `/v1/models` (embedding-sounding ones like
+  bge/e5/gte/nomic first) and reports **whether any of them embeds and with which model** (up to 12
+  models). With a multi-model router that answers "do embeddings work at all" in a single scan. The
+  result distinguishes: ✓ *via model X (dim N)* / ✗ *route present, no embedding model found* /
+  ✗ *no route*.
 
-### 2026-07-07 (Capabilities: parandatud timeout-viga + /health proov)
-- **Parandatud `TypeError: httpx.AsyncClient() got multiple values for keyword argument 'timeout'`**,
-  mis kukutas KÕIK Capabilities-tabi endpoint-proovid (chat, completions, embeddings jne näitasid
-  valelt "no" koos TypeError-detailiga). Põhjus: `probe_json` andis `_http(timeout=…)`, aga `_http`
-  seadis `timeout` juba ise — nüüd kasutab `_http` `setdefault`-i, nii et kutsuja saab üle kirjutada.
-- **Lisatud `/health` marsruudi proov** (enamik routereid/vLLM pakub seda). Nüüd testitud päris
-  `LLMClient` + httpx MockTransport'iga (mitte ainult mock-objektiga), mis oleks selle vea kohe tabanud.
+### 2026-07-07 (Capabilities: fixed a timeout crash + a /health probe)
+- **Fixed `TypeError: httpx.AsyncClient() got multiple values for keyword argument 'timeout'`**, which
+  crashed EVERY endpoint probe on the Capabilities tab (chat, completions, embeddings and so on all
+  falsely showed "no" with a TypeError detail). The cause: `probe_json` passed `_http(timeout=…)` while
+  `_http` already set `timeout` itself — `_http` now uses `setdefault`, so the caller can override it.
+- **Added a `/health` route probe** (most routers/vLLM offer it). Now tested with a real `LLMClient`
+  plus an httpx MockTransport (not just a mock object), which would have caught this bug immediately.
 
-### 2026-07-07 (uus Capabilities-tab — funktsionaalsuse avastus)
-- **Uus "Capabilities" tab (Provider-fit järel)** — kaardistab, mis funktsionaalsust endpoint/mudel
-  pakub. Kolm rühma: **API-marsruudid** (`/v1/models`, chat, completions, **`/v1/embeddings`** koos
-  vektori dimensiooniga, `/v1/rerank`, `/tokenize`, `/v1/moderations`, images, audio speech/transcribe),
-  **chat-funktsioonid** (voogedastus, natiivne tööriista-kutse, JSON object/schema režiim, vision,
-  n>1, logprobs, stop-jadad, seed-korratavus, reasoning) ja **mudeli metaandmed** (konteksti pikkus,
-  hinnakiri, omanik). Iga rida = üks väike proov → ✓ supported / ✗ no / ~ present / — n/a.
-- Marsruudi-tuvastus: iga vastus peale 404 loeb marsruudi olemasolevaks, nii eristub "otspunkti pole"
-  tegelikust "otspunkt on, aga see mudel ei toeta" (nt embeddings üldmudelil).
-- Tulemused värvikoodiga puus (rühma-päised + ridade rohelin/punane/oranž), **Copy results** kopeerib
-  tab-eraldatud tabeli. Skann ei tekita koormust (~2 tosinat kiiret päringut).
-- Klient sai `probe_json(method, path, body)` madalataseme otspunkti-proovija; backend `capabilities_probe()`.
+### 2026-07-07 (new Capabilities tab — feature discovery)
+- **New "Capabilities" tab (after Provider fit)** — maps what an endpoint/model offers. Three groups:
+  **API routes** (`/v1/models`, chat, completions, **`/v1/embeddings`** with the vector dimension,
+  `/v1/rerank`, `/tokenize`, `/v1/moderations`, images, audio speech/transcribe), **chat features**
+  (streaming, native tool calling, JSON object/schema mode, vision, n>1, logprobs, stop sequences,
+  seed reproducibility, reasoning) and **model metadata** (context length, pricing, owner). Each row =
+  one small probe → ✓ supported / ✗ no / ~ present / — n/a.
+- Route detection: any response other than 404 counts the route as existing, which distinguishes "no
+  such endpoint" from a real "the endpoint is there, but this model does not support it" (e.g.
+  embeddings on a general model).
+- The results are shown in a colour-coded tree (group headers + green/red/orange rows); **Copy
+  results** copies the table tab-separated. The scan puts no load on the server (~two dozen quick
+  requests).
+- The client gained a low-level endpoint prober, `probe_json(method, path, body)`; backend
+  `capabilities_probe()`.
 
-### 2026-07-06 (Provider-fit tabi paigutus korda)
-- **Provider-fit väljade paigutus parandatud** — parem väljapaar (Output tokens / Requests per level /
-  Context probe) oli varem paisatud kaugele paremasse serva (osaliselt ekraanilt välja). Põhjus:
-  murdumatu intro-tekst paisutas grid'i ~1650px laiuseks ja ilma venitava veeruta hajusid väljad
-  laiali. Nüüd: intro **murdub** pane laiusele (ja resize'imisel dünaamiliselt), väljad on **kahes
-  joondatud veerus** (labelid paremjoondatud, ühtlane vahe) ja **venitav sabaveerg** hoiab väljad
-  vasakul kompaktselt. Neli kontroll-linnukest on koondatud "Kontrollid" alapealkirja alla.
-- **Uus "Capacity" tab (Soak ja Model-fit vahel)** — mõõdab endpoint'i **tipp-püsiva tokenit/minutis**
-  ehk võimsuse **lae**. Erinevalt Soak-ist (fikseeritud concurrency → tok/tunnis) **tõstab Capacity
-  concurrency't astmeliselt (1 → 2 → 4 → … → Max concurrency)**, hoiab igal astmel koormust
-  "Window / step" sekundit (vaikimisi 40 s), viskab akna esimese ~kolmandiku ära (warm-up) ja mõõdab
-  ülejäänu pealt steady-state IN/OUT/TOTAL tok/min.
-- **Auto-saturatsioon:** ramp peatub varakult, kui läbilaskevõime platoole jõuab (< 8% kasvu),
-  server hakkab tagasi lükkama (429/503), tekivad kõvad vead/timeout'id või väljund kärbitakse.
-  Tulemus näitab **tipp-TOTAL tok/min, millisel concurrency'l** ja **miks ramp peatus** (+ tok/h
-  projektsioon ja küllastuskõvera graafik). Kui jõuab max-ni ilma peatumata → *"still climbing"*.
-- **Valikuline "Target tok/min" väli → PASS/FAIL** verdikt: kas mõõdetud tipp-võimsus täidab nõutava
-  tokenit/minutis (nt lepingu TPM). Tühjaks jättes lihtsalt mõõdab lae.
+### 2026-07-06 (Provider-fit tab layout fixed)
+- **The Provider-fit field layout is fixed** — the right-hand pair of fields (Output tokens / Requests
+  per level / Context probe) used to be thrown far to the right edge (partly off-screen). The cause: an
+  unwrapped intro text inflated the grid to ~1650px wide and, without a stretching column, the fields
+  scattered. Now: the intro **wraps** to the pane width (and dynamically on resize), the fields sit in
+  **two aligned columns** (labels right-aligned, even spacing) and a **stretching tail column** keeps
+  the fields compact on the left. The four check boxes are gathered under a "Checks" sub-heading.
+- **New "Capacity" tab (between Soak and Model fit)** — measures the endpoint's **peak sustained
+  tokens/minute**, i.e. the capacity **ceiling**. Unlike Soak (fixed concurrency → tokens/hour),
+  **Capacity ramps concurrency in steps (1 → 2 → 4 → … → Max concurrency)**, holds the load at each
+  step for "Window / step" seconds (40 s by default), discards the first ~third of the window (warm-up)
+  and measures steady-state IN/OUT/TOTAL tok/min over the rest.
+- **Auto-saturation:** the ramp stops early when throughput plateaus (< 8% growth), the server starts
+  rejecting (429/503), hard errors/timeouts appear or the output is truncated. The result shows the
+  **peak TOTAL tok/min, at which concurrency** and **why the ramp stopped** (+ a tok/h projection and a
+  saturation-curve chart). If it reaches the max without stopping → *"still climbing"*.
+- **An optional "Target tok/min" field → a PASS/FAIL verdict:** does the measured peak capacity meet
+  the required tokens/minute (e.g. a contractual TPM)? Leave it empty and it simply measures the ceiling.
 - Backend: `capacity_test()` + `_capacity_levels()` (benchmark.py); GUI: `_build_capacity_tab` +
-  handlerid, eestikeelsed tõlked, Cmd+R tugi. Nagu Optimum finder / Soak, on ka Capacity koormustest.
+  handlers, Estonian translations, Cmd+R support. Like the Optimum finder / Soak, Capacity is a load test.
 
-### 2026-07-06 (Capacity-tabi visuaalne lihv + täpsem diagnostika)
-- **Graafik loetavam:** teljesildid nüüd kompaktsed (31.2M, mitte 31242857) — parandus kehtib
-  kõigile graafikutele (Soak, Benchmark jt). Capacity-kõveral on **saturatsioonipunktid punased**
-  ja **tipp rõngastatud** rohelise "peak"-markeriga.
-- **Verdikt värviline:** suur readout läheb tulemusega roheliseks (võimsus leitud / target täidetud)
-  või punaseks (target täitmata / püsivat võimsust pole); target-tulemus (✅/❌) on nüüd ka readout'is.
-  Logi sammuread joondatud veergudesse, ebatervete tasemete juures ⚠.
-- **Täpsem diagnostika:** kui ükski päring ei jõua mõõteakna sees valmis (aken lühem kui päringu
-  kestus), öeldakse nüüd selgelt *"no request finished inside the measurement window (a request
-  takes ~Xs vs Ys window) — raise ‘Window / step’"* varasema eksitava "output truncated" asemel.
-- Backend emitib `step_done` hetkeseisu nüüd värske peak'iga (varem jäi readout sammu võrra maha).
+### 2026-07-06 (Capacity tab visual polish + sharper diagnostics)
+- **A more readable chart:** the axis labels are now compact (31.2M, not 31242857) — the fix applies to
+  every chart (Soak, Benchmark and the rest). On the Capacity curve the **saturation points are red**
+  and the **peak is ringed** with a green "peak" marker.
+- **A coloured verdict:** the large readout turns green with the result (capacity found / target met)
+  or red (target missed / no sustained capacity); the target result (✅/❌) is now in the readout too.
+  The log's step lines are aligned into columns, with a ⚠ at unhealthy levels.
+- **Sharper diagnostics:** when no request finishes inside the measurement window (the window is
+  shorter than a request takes), it now says clearly *"no request finished inside the measurement
+  window (a request takes ~Xs vs Ys window) — raise ‘Window / step’"* instead of the previous
+  misleading "output truncated".
+- The backend now emits the `step_done` snapshot with a fresh peak (previously the readout lagged one
+  step behind).
 
-### 2026-07-06 (Hermes tööriista-proov nüüd tagavara, mitte alati)
-- **Provider-fit'i "Tool calling (Hermes prompt)" kontroll on nüüd TAGAVARA** — see jookseb ainult siis,
-  kui natiivne `tools` API-kontroll (mis gate'ib verdikti) ei tööta. Natiivse tööriista-kutsega mudel
-  (nt Qwen3) ei vaja prompt-põhist Hermes/NousResearch `<tool_call>` XML-konventsiooni, seega näidatakse
-  nüüd rohelist _"n/a — native tool-calling works"_ segadust tekitava punase _"0/3 correct Hermes tool
-  calls"_ asemel. Kui natiivne kukub, testitakse Hermes-t nagu varem (3 juhtu, näidatakse mudeli
-  tegelikku vastust). Kumbki kontroll ei mõjuta verdikti — mõlemad on informatiivsed.
+### 2026-07-06 (the Hermes tool probe is now a fallback, not always run)
+- **Provider fit's "Tool calling (Hermes prompt)" check is now a FALLBACK** — it only runs when the
+  native `tools` API check (which gates the verdict) does not work. A model with native tool calling
+  (e.g. Qwen3) does not need the prompt-based Hermes/NousResearch `<tool_call>` XML convention, so it
+  now shows a green _"n/a — native tool-calling works"_ instead of a confusing red _"0/3 correct Hermes
+  tool calls"_. If the native path fails, Hermes is tested as before (3 cases, showing the model's
+  actual answer). Neither check affects the verdict — both are informational.
 
-### 2026-07-06 (Model-fit "Copy results" nupp)
-- **Model-fit tabil "Copy results" nupp** — kopeerib lõikelauale raporti (verdikt + skoorid) ja
-  kogu proovi-tabeli **täis-detailidega** (sh täielikud vea-teated), tab-eraldatud kujul. Sama mustri
-  järgi nagu Provider-fit / Benchmark / Optimum finder.
+### 2026-07-06 (a Model-fit "Copy results" button)
+- **A "Copy results" button on the Model-fit tab** — copies the report (verdict + scores) and the whole
+  probe table with **full detail** (including complete error messages) to the clipboard, tab-separated.
+  Same pattern as Provider fit / Benchmark / Optimum finder.
 
-### 2026-07-06 (mööduva serveri-tõrke (5xx) automaatne kordamine proovidel)
-- **Võimekus-proovid (compliance / integrity / model-fit / recall) kordavad nüüd mööduva 5xx serveri-
-  tõrke (nt hetkeline 503 üle-koormus) või ühendus-/timeout-vea korral automaatselt** (kuni 2× väikese
-  backoff'iga). Varem võis serveri hetkeline hikk kukutada kogu testi (nt kõik tool-proovid → "HTTP 503"
-  → vale "EI SOBI"). **Koormus-/soak-tee EI korda** — seal on 503 just admission-control signaal, mida
-  mõõdame. Klient sai `generate(..., retries=N)` parameetri ja `_is_transient()` eristuse (5xx/ühendus-
-  viga korratav, 4xx mitte).
-- **Ebaõnnestunud tool-proovi detail hoiab nüüd KOGU serveri veateate** (varem kärbitud 60 tähega), nii
-  et Model-fit real topeltklõps näitab täielikku 503-vastust — vajalik server-poolse tõrke (nt katkine
-  tool-genereerimise tee) diagnoosimiseks. Klient püüab vea-keha nüüd 600 tähe ulatuses.
+### 2026-07-06 (automatic retry of a transient server error (5xx) on probes)
+- **The capability probes (compliance / integrity / model-fit / recall) now retry automatically** on a
+  transient 5xx server error (e.g. a momentary 503 overload) or a connection/timeout error (up to 2×
+  with a small backoff). Previously a momentary server hiccup could fail the whole test (e.g. every
+  tool probe → "HTTP 503" → a false "NOT FIT"). **The load/soak path does NOT retry** — there a 503 is
+  precisely the admission-control signal being measured. The client gained a `generate(..., retries=N)`
+  parameter and an `_is_transient()` distinction (5xx/connection error retriable, 4xx not).
+- **The detail of a failed tool probe now keeps the WHOLE server error message** (previously truncated
+  at 60 characters), so double-clicking a Model-fit row shows the complete 503 response — needed to
+  diagnose a server-side fault (e.g. a broken tool-generation path). The client now captures up to 600
+  characters of the error body.
 
-### 2026-07-06 (calculator-juhtumid eksplitsiitseks; klikk-avab-detaili)
-- **Model-fit tabelil topeltklõps real avab mudeli täis-prompti ja täis-detaili** eraldi aknas
-  (tabeliveerud lõikavad pika teksti ära, nt "→ no tool call — model said: …").
-- **Model-fit calculator-juhtumid teevad nüüd eksplitsiitse tööriista-palve** ("Use the calculator
-  tool to compute …"). Varem: võimekas mudel arvutas lihtsa aritmeetika ise (õigesti!) tööriista
-  kutsumata, mida test luges veaks — see kõigutas tool-skoori juhuslikult (nt 76% ↔ 88%). Nüüd on
-  ootus üheselt tööriista-kutse, seega juht on deterministlik. (Weather/search/email juhud on
-  muutmata — need vajavad päriselt tööriista.)
+### 2026-07-06 (calculator cases made explicit; click opens the detail)
+- **Double-clicking a row in the Model-fit table opens the model's full prompt and full detail** in a
+  separate window (the table columns cut long text off, e.g. "→ no tool call — model said: …").
+- **The Model-fit calculator cases now make an explicit tool request** ("Use the calculator tool to
+  compute …"). Previously a capable model computed simple arithmetic itself (correctly!) without
+  calling the tool, which the test counted as a failure — and that made the tool score wobble randomly
+  (e.g. 76% ↔ 88%). The expectation is now unambiguously a tool call, so the case is deterministic.
+  (The weather/search/email cases are unchanged — those genuinely need a tool.)
 
-### 2026-07-06 (Model-fit natiivne tool-calling; native-värav ka OpenRouterile; completions-serv)
-- **Model-fit testib nüüd natiivset tool-callingut** (OpenAI `tools` API), Hermes-prompt tagavarana.
-  Varem testis Model-fit **ainult** Hermes-`<tool_call>` konventsiooni, mistõttu natiivset tool-callingut
-  toetav (aga Hermes-XML-i mitte-emiteeriv) mudel sai valelt "EI SOBI (Hermes)". Nüüd krediteeritakse
-  mudelit, kui ta kutsub tööriista **kumbat tahes** viisi; ainult mudel, kes kumbagi ei tee, saab nulli.
-  Verdiktist eemaldatud "(Hermes)" spetsiifika.
-- **Model-fit sai "Lülita thinking testi ajaks välja" märkeruudu** (vaikimisi sees) — sama nagu
-  Provider-fit, et Qwen3-stiilis reasoning-mudelit testitakse agentses režiimis.
-- **Natiivne tool-calling gate'ib nüüd ka OpenRouteri verdiktit** (lisaks HuggingFace'ile) — router,
-  mis suunab tool-calling liiklust, vajab, et mudel `tools` API-t toetaks.
-- **Parandus:** Provider-fit natiivne tool-test näitab `/v1/completions` otspunktil ausalt
-  "n/a — completions-il pole tools API-t", mitte eksitavat "no tool_calls — model said: …"
-  (legacy completions-endpointile ei saagi `tools` parameetrit saata).
+### 2026-07-06 (Model-fit native tool calling; the native gate for OpenRouter too; a completions fix)
+- **Model fit now tests native tool calling** (the OpenAI `tools` API), with the Hermes prompt as a
+  fallback. Previously Model fit tested **only** the Hermes `<tool_call>` convention, so a model that
+  supports native tool calling (but does not emit Hermes XML) falsely got "NOT FIT (Hermes)". A model
+  is now credited if it calls a tool **either way**; only a model that does neither scores zero. The
+  "(Hermes)" specificity has been removed from the verdict.
+- **Model fit gained the "Disable thinking during test" checkbox** (on by default) — the same as
+  Provider fit, so a Qwen3-style reasoning model is tested in its agentic mode.
+- **Native tool calling now gates the OpenRouter verdict too** (in addition to HuggingFace) — a router
+  that sends tool-calling traffic needs the model to support the `tools` API.
+- **Fix:** the Provider-fit native tool test now honestly shows "n/a — completions has no tools API" on
+  the `/v1/completions` endpoint, instead of a misleading "no tool_calls — model said: …" (the legacy
+  completions endpoint cannot take a `tools` parameter at all).
 
-### 2026-07-05 (thinking-välja-lülitamise valik Provider-fit'is)
-- **Uus märkeruut "Lülita thinking testi ajaks välja (testi agentset režiimi)"** — vaikimisi **sees**.
-  Saadab iga testi-päringuga `chat_template_kwargs.enable_thinking=false`, nii et Qwen3-stiilis
-  reasoning-mudelit testitakse tema **agentses (thinking-off) režiimis**. Põhjus: Provider-fit mõõdab,
-  kas backend suudab teenindada **agentset / tool-calling liiklust**, ja thinking-režiimis kipub selline
-  mudel "ülemõtlema" — arutleb proosas ja vastab otse, kutsumata tööriista, mistõttu tool-proovid
-  kukuvad kuigi mudel on võimekas. Ruudu saab maha võtta, et testida thinking-varianti nii-nagu-on.
-  Serverid, mis parameetrit ei toeta, lihtsalt ignoreerivad seda.
-- Klient (`client.py`) sai üldise `extra_body` läbiviigu — suvalised top-level request-body väljad
-  ühendatakse igasse päringusse (ilma parameetrit igale kutsele käsitsi läbi andmata).
+### 2026-07-05 (a disable-thinking option in Provider fit)
+- **A new "Disable thinking during test (test the agentic mode)" checkbox** — **on** by default. It
+  sends `chat_template_kwargs.enable_thinking=false` with every test request, so a Qwen3-style
+  reasoning model is tested in its **agentic (thinking-off) mode**. The reason: Provider fit measures
+  whether a backend can serve **agentic / tool-calling traffic**, and in thinking mode such a model
+  tends to "overthink" — it reasons in prose and answers directly without calling a tool, so the tool
+  probes fail even though the model is capable. Uncheck it to test the thinking variant as-is. Servers
+  that do not support the parameter simply ignore it.
+- The client (`client.py`) gained a general `extra_body` pass-through — arbitrary top-level request-body
+  fields are merged into every request (without threading the parameter through each call by hand).
 
-### 2026-07-05 (natiivne tool-calling test + diagnostika toorvastusega)
-- **Uus kontroll: "Tool calling (native API)"** — Provider-fit saadab nüüd päris OpenAI `tools`/
-  `tool_choice` API-parameetri (mitte ainult prompt-põhist Hermes-konventsiooni) ja loeb vastuse
-  `tool_calls` välja (nii streaming `delta.tool_calls` fragmentide kokkupanek kui non-streaming
-  `message.tool_calls`). See on tänapäeval **päris standard**, mida OpenRouter/vLLM/TGI/SGLang
-  kasutavad — vana Hermes-XML test testis vaid **ühte kindlat fine-tune'i konventsiooni**, mistõttu
-  hea, natiivset tool-callingut toetav mudel sai varem valelt "EI SOBI".
-  - Vana kontroll on ümber nimetatud **"Tool calling (Hermes prompt)"** ja jääb infoks (ei mõjuta enam
-    verdikti), samal ajal kui **"Tool calling (native API)" gate'ib nüüd HuggingFace'i verdikti**.
-  - Klient (`client.py`) sai `tools`/`tool_choice` läbiviigu ja `RequestResult.tool_calls` välja;
-    TTFT arvestab nüüd ka tool-call-only vastuseid (muidu näinuks voog "mitte-voogedastatuna").
-- **Ebaõnnestunud tool-call proovid näitavad nüüd toorvastust.** Varem kuvati lihtsalt "→ ∅" kui
-  midagi ei õnnestunud parsida — ei saanud vahet teha, kas mudel ignoreeris tööriistu täielikult
-  või proovis teises vormingus. Nüüd (nii Provider-fit'is kui Model-fit'is) näidatakse mudeli
-  tegelikku vastust (lühendatult), nii et jooks on ise-diagnoosiv.
+### 2026-07-05 (a native tool-calling test + diagnostics with the raw answer)
+- **A new check: "Tool calling (native API)"** — Provider fit now sends the real OpenAI `tools`/
+  `tool_choice` API parameter (not just the prompt-based Hermes convention) and reads the response's
+  `tool_calls` field (assembling streaming `delta.tool_calls` fragments as well as non-streaming
+  `message.tool_calls`). This is **the actual standard** today, used by OpenRouter/vLLM/TGI/SGLang —
+  the old Hermes XML test only tested **one particular fine-tune's convention**, so a good model with
+  native tool calling used to get a false "NOT FIT".
+  - The old check has been renamed **"Tool calling (Hermes prompt)"** and stays informational (it no
+    longer affects the verdict), while **"Tool calling (native API)" now gates the HuggingFace verdict**.
+  - The client (`client.py`) gained `tools`/`tool_choice` pass-through and a `RequestResult.tool_calls`
+    field; TTFT now also counts tool-call-only responses (otherwise the stream would have looked
+    "non-streaming").
+- **Failed tool-call probes now show the raw answer.** Previously it simply showed "→ ∅" when nothing
+  could be parsed — you could not tell whether the model ignored the tools entirely or tried another
+  format. Now (in both Provider fit and Model fit) the model's actual answer is shown (abbreviated), so
+  a run is self-diagnosing.
 
-### 2026-07-05 (aken sobitub ekraaniga; Provider fit copy-nupud)
-- **Aken sobitub erineva suurusega ekraanidele** — akna algsuurus (ja Abi- ning Võrdlus-akende
-  suurus) arvutatakse nüüd ekraani mõõtude järgi (kuni 92%/88% laius/kõrgus, tsentreeritud), mitte
-  fikseeritud konstandi järgi. Varem võis 1400×1010 aken avaneda **suuremana kui väiksem kuvar**
-  (nt väiksem sülearvuti ekraan või tiled/split-screen paigutus). Minimaalne akna suurus on piiratud
-  **arvutatud algsuurusega, mitte ekraaniga eraldi** — ülevaatusel selgus, et kaks eri valemit oleks
-  väiksel ekraanil võinud `minsize`-i suuremaks arvutada kui algsuurus, mille peale Tk sunniks akna
-  kohe suuremaks (tühistades ekraanile-sobitamise); nüüd on `minsize ≤ algsuurus` alati tagatud.
-- **Provider fit — "Copy sweep table" ja "Copy report" nupud.** Esimene kopeerib paralleelsuse
-  sweep-tabeli (tab-eraldatud, nagu Benchmark/Optimum finder). Teine kopeerib **kogu testi
-  transkriptsiooni** (compliance + integrity + verdiktid) lõikelauale tavatekstina — täpselt
-  see, mida vajad tulemuse jagamiseks kolmanda osapoolega (nt inseneriga, kes hindab backend'i).
+### 2026-07-05 (the window fits the screen; Provider fit copy buttons)
+- **The window fits screens of different sizes** — the window's initial size (and the size of the Help
+  and Comparison windows) is now computed from the screen's dimensions (up to 92%/88% width/height,
+  centred) rather than from a fixed constant. Previously a 1400×1010 window could open **larger than a
+  smaller display** (e.g. a smaller laptop screen or a tiled/split-screen layout). The minimum window
+  size is bounded by the **computed initial size, not by the screen separately** — a review found that
+  two different formulas could compute a `minsize` larger than the initial size on a small screen,
+  whereupon Tk would immediately force the window bigger (defeating the fit-to-screen); now
+  `minsize ≤ initial size` is always guaranteed.
+- **Provider fit — "Copy sweep table" and "Copy report" buttons.** The first copies the concurrency
+  sweep table (tab-separated, like Benchmark/Optimum finder). The second copies **the whole test
+  transcript** (compliance + integrity + verdicts) to the clipboard as plain text — exactly what you
+  need to share a result with a third party (e.g. an engineer assessing the backend).
 
-### 2026-07-05 (reasoning-mudelite tugi Provider-fit'is)
-- **Reasoning-mudelid** (nt DeepSeek-R1 / Qwen thinking) ei anna enam valet "EI SOBI" raportit.
-  Varem: kui mudel pani nähtava vastuse `reasoning_content`-i ja väike token-eelarve kulus peidetud
-  arutlusele, sai tööriist teksti tagasi tühjana → kaskaad valesid kukkumisi (sh vale "token-
-  inflatsioon ×N" ja "kvaliteet 0%").
-  - Klient püüab nüüd **`reasoning_content` / `reasoning`** (streaming + non-stream), loeb need
-    chunkide sisse ja **mõõdab TTFT ka esimese reasoning-tokeni pealt** (parandab streaming-tuvastuse).
-  - **Token-aususe test loeb reasoning-tokenid kaasa** — thinking-mudelit ei süüdistata enam
-    billing-inflatsioonis (reaalsed tokenid on ausad, ka kui `content` on tühi).
-  - Provider-fit **tuvastab reasoning-mudeli** ja annab korrektsus-/kvaliteedi-/recall-proovidele
-    **laiendatud token-eelarve** + eemaldab `<think>…</think>`, et jõuda nähtava vastuseni.
-  - Raport märgib "🧠 reasoning model" ja History salvestab `reasoning model: yes/no`.
-  - Tuvastus ja eemaldus töötavad ka **kohaliku serveri stiiliga** reasoning-mudelitel (vLLM /
-    llama.cpp / SGLang), kus `<think>` on **otse `content`-is**, mitte eraldi `reasoning_content`
-    väljas — sh juhul kui token-eelarve ei jõua sulgevat `</think>` silti kätte saada (poolelijäänud
-    arutlus loetakse tervikuna reasoning'uks, mitte vastuseks).
+### 2026-07-05 (reasoning-model support in Provider fit)
+- **Reasoning models** (e.g. DeepSeek-R1 / Qwen thinking) no longer produce a false "NOT FIT" report.
+  Previously: if a model put the visible answer into `reasoning_content` and a small token budget went
+  entirely on hidden reasoning, the tool got the text back empty → a cascade of false failures
+  (including a bogus "token inflation ×N" and "quality 0%").
+  - The client now captures **`reasoning_content` / `reasoning`** (streaming and non-streaming), folds
+    them into the chunks and **measures TTFT from the first reasoning token too** (fixing streaming
+    detection).
+  - **The token-honesty test counts reasoning tokens** — a thinking model is no longer accused of
+    billing inflation (the real tokens are honest even when `content` is empty).
+  - Provider fit **detects a reasoning model** and gives the correctness/quality/recall probes an
+    **extended token budget** + strips `<think>…</think>` to reach the visible answer.
+  - The report is marked "🧠 reasoning model" and History stores `reasoning model: yes/no`.
+  - Detection and stripping also work for **local-server-style** reasoning models (vLLM / llama.cpp /
+    SGLang), where `<think>` is **directly inside `content`** rather than in a separate
+    `reasoning_content` field — including when the token budget never reaches the closing `</think>`
+    tag (unfinished reasoning is counted wholly as reasoning, not as the answer).
 
-### 2026-07-05 (mugavus & andmed)
-- **Koormuse eelseaded** — Connection-tabil nupud **Vestlus / RAG / Agent**, mis täidavad ühe
-  klõpsuga mõistlikud parameetrid Benchmark-, Soak- ja Provider-fit-tabidel.
-- **Risthost/-mudel võrdlus** — History-tabil vali mitu rida (Cmd/Shift-klõps) ja **"Võrdle valitud"**
-  avab kõrvutise tabeli (mõõdikud × jooksud) — server A vs B, mudel X vs Y, ka üle erinevate konfigide.
-- **Jagatav raport** — **"Ekspordi raport"** salvestab valitud jooksu(d) Markdown- või HTML-failina
-  (metaandmed + mõõdikute tabel; mitme valiku puhul võrdlustabel).
-- **Valmimise-teavitused** — macOS desktop-notification + heli, kui **pikk** test (≥8 s) lõpeb.
-- **Kiirklahvid** — Cmd+R (käivita aktiivse tabi test), Cmd+. / Esc (peata), Cmd+D (detect),
-  Cmd+L (loetle mudelid).
-- Parandus: Provider-fit nupp keelatakse nüüd samuti jooksva testi ajal; staatusriba "Valmis." järgib
-  keelevalikut.
+### 2026-07-05 (convenience & data)
+- **Load presets** — **Chat / RAG / Agent** buttons on the Connection tab that fill sensible parameters
+  into the Benchmark, Soak and Provider-fit tabs in one click.
+- **Cross host/model comparison** — on the History tab select several rows (Cmd/Shift-click) and
+  **"Compare selected"** opens a side-by-side table (metrics × runs) — server A vs B, model X vs Y,
+  across different configs too.
+- **Shareable report** — **"Export report"** saves the selected run(s) as a Markdown or HTML file
+  (metadata + a metrics table; a comparison table when several are selected).
+- **Completion notifications** — a macOS desktop notification + a sound when a **long** test (≥8 s)
+  finishes.
+- **Keyboard shortcuts** — Cmd+R (run the active tab's test), Cmd+. / Esc (stop), Cmd+D (detect),
+  Cmd+L (list models).
+- Fix: the Provider-fit button is now also disabled while a test is running; the status bar's "Ready."
+  follows the language choice.
 
-### 2026-07-05 (UI-seaded)
-- **Abi-aken** (üleval paremal ❔) — juhend vahekaartide kaupa + näpunäited, **Visioline Infra**
-  infrastruktuuri rida ja **support@itteam.eu** kontakt (nupp kopeerib aadressi). Sisu on kakskeelne.
-- **Teema-valik** — Süsteem / Hele / Tume, rakendub kohe. CustomTkinteri widget'id uuenevad ise;
-  `_retheme()` värskendab paleti custom tk-graafikutel, `LiveLog`-idel ja ttk-tabelitel. Taastub
-  käivitusel.
-- **Keelevalik** — inglise (primary) / eesti. Kerge `L()` abifunktsioon (inglise string = võti,
-  tõlkimata → inglise fallback), rakendatud tsentraalselt `_section`-is ja `_lbl`-is; tõlgitud on
-  vahekaartide nimed, sektsioonid, väljasildid, nupud, checkbox'id. Keele vahetus ehitab vahekaardid
-  uuesti (blokitud jooksva testi ajal; ajalugu ja ühendusväljad säilivad). ⓘ-abitekstid ja pikad
-  kirjeldused jäävad inglise keelde.
-- **Seadete püsivus** — uus `store` settings-tabel (`get_setting`/`set_setting`); teema ja keel
-  salvestuvad `~/.llmscanner`-i.
+### 2026-07-05 (UI settings)
+- **The Help window** (❔ at the top right) — a per-tab guide + tips, an infrastructure line and a
+  support contact (a button copies the address). The content is bilingual.
+- **Theme selection** — System / Light / Dark, applied immediately. The CustomTkinter widgets update
+  themselves; `_retheme()` refreshes the palette on the custom tk charts, the `LiveLog`s and the ttk
+  tables. Restored on launch.
+- **Language selection** — English (primary) / Estonian. A light `L()` helper (the English string is
+  the key; untranslated → an English fallback), applied centrally in `_section` and `_lbl`; tab names,
+  sections, field labels, buttons and checkboxes are translated. Switching language rebuilds the tabs
+  (blocked while a test is running; the history and the connection fields survive). The ⓘ help texts
+  and long descriptions stay English.
+- **Settings persistence** — a new `store` settings table (`get_setting`/`set_setting`); the theme and
+  language are saved under `~/.llmscanner`.
 
 ### 2026-07-04
-- **Provider fit** — uus vahekaart, mis hindab, kas backend kannatab OpenRouter/HuggingFace liiklust
-  ja kus ta esimesena katki läheb:
-  - **API-lepingu vastavus** (14 kontrolli) — streaming, usage-arvestus, max_tokens, stop, determinism,
-    sampling-parameetrid, concurrent-korrektsus, puhtad veakoodid, tool-calling, structured output,
-    `/v1/models` metadata (pricing + context_length), API-võtme auth-jõustamine.
-  - **Aususe-testid** — token-loenduse ausus (kõva OpenRouter-blokk billing-inflatsiooni vastu),
-    konteksti-ausus (needle-in-haystack), mudeli kvaliteet (golden-answer eval), kliendi-katkestuse
-    käitlus, logprob-fingerprint.
-  - **Paralleelsuse sweep** — läbilaskevõime põlv + pudelikaela-klassifikatsioon (prefill/decode/
-    batching/admission/stabiilsus), p95 **ja p99** latents.
-  - **Verdikt** kummalegi pakkujale (SOBIB / PIIRIPEAL / EI SOBI), vastavuses nende dokumentatsiooniga
-    (nt HF 5 s TTFT lävi). Tulemus salvestub History-sse.
-  - Klient sai `finish_reason`, `stop`/`top_p`/`seed`/`logprobs` läbiviigu, `stream_chunks`,
-    `logprob_avg`, `stream_abort()` ja `list_models_raw()` — kõik tagasiühilduvad.
-- **Model fit** ühendatud History/võrdlusega (üldsobivus %, jooksude-vaheline muutus).
-- **Iseseisev macOS executable** — `build_macos.sh` + `app_entry.py` → `dist/LLMScanner`
-  (PyInstaller `--onefile`, ikoon genereeritakse jooksul).
-- **`run.sh` / `run.command`** — ühe käsuga käivitus (loob venv + install esimesel korral).
+- **Provider fit** — a new tab that judges whether a backend can take OpenRouter/HuggingFace traffic
+  and where it breaks first:
+  - **API-contract compliance** (14 checks) — streaming, usage accounting, max_tokens, stop,
+    determinism, sampling parameters, concurrent correctness, clean error codes, tool calling,
+    structured output, `/v1/models` metadata (pricing + context_length), API-key auth enforcement.
+  - **Integrity tests** — token-count honesty (a hard OpenRouter block against billing inflation),
+    context honesty (needle-in-a-haystack), model quality (a golden-answer eval), client-cancellation
+    handling, logprob fingerprint.
+  - **Concurrency sweep** — the throughput knee + a bottleneck classification (prefill/decode/
+    batching/admission/stability), p95 **and p99** latency.
+  - **A verdict per provider** (FIT / BORDERLINE / NOT FIT), following their documentation (e.g. HF's
+    5 s TTFT threshold). The result is stored in History.
+  - The client gained `finish_reason`, `stop`/`top_p`/`seed`/`logprobs` pass-through, `stream_chunks`,
+    `logprob_avg`, `stream_abort()` and `list_models_raw()` — all backwards compatible.
+- **Model fit** wired into History/comparison (overall fit %, the change between runs).
+- **A standalone macOS executable** — `build_macos.sh` + `app_entry.py` → `dist/LLMScanner`
+  (PyInstaller `--onefile`, the icon generated at runtime).
+- **`run.sh` / `run.command`** — one-command launch (creates the venv + installs on first run).
 
 ### 2026-07-03
-- **Soak-test** — uus vahekaart: hoiab püsivat koormust N minutit ja mõõdab **tokeneid tunnis**;
-  toetab **TheEye** päris-koormuse kordamist ja **ülekoormuse-proovikut** (+10%, admission-control).
-- Hinnanguliste tokeni-loendite märgistamine, kui server ei saada usage-blokki.
-- Under-generation'i märgistamine, kui server ignoreerib `ignore_eos`.
-- Vaikeväärtused: concurrency lagi 64, requests-per-worker 2, max-konteksti lagi 65536, settle-paus 3 s.
+- **Soak test** — a new tab: holds a sustained load for N minutes and measures **tokens per hour**;
+  supports replaying **TheEye's** real workload and an **overload probe** (+10%, admission control).
+- Marking token counts as estimated when the server sends no usage block.
+- Marking under-generation when the server ignores `ignore_eos`.
+- Defaults: concurrency ceiling 64, requests-per-worker 2, max-context ceiling 65536, settle pause 3 s.
 
 ### 2026-07-02
-- **Esmane väljalase** — LLM Scanner: lokaalsete LLM-serverite (vLLM, SGLang, Ollama, llama.cpp,
-  TGI, LM Studio) avastamine, benchmarkimine ja häälestamine Mac-sõbraliku GUI-ga
+- **Initial release** — LLM Scanner: discovering, benchmarking and tuning local LLM servers (vLLM,
+  SGLang, Ollama, llama.cpp, TGI, LM Studio) with a Mac-friendly GUI
   (Connection / Benchmark / Optimum finder / Network scan / History).
-- **Cancel-nupp** Optimum finderi testi katkestamiseks.
+- **A Cancel button** to interrupt the Optimum finder's test.

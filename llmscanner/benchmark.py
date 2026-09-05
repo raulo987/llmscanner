@@ -1061,7 +1061,7 @@ async def capacity_test(client: LLMClient, model: Optional[str], *,
 # things an agentic caller needs: emit valid Hermes-style tool calls, pick the
 # right tool with the right arguments, NOT call a tool when it shouldn't, return
 # strict JSON, and follow tight formatting instructions. Each dimension yields a
-# 0..1 score; a weighted blend plus hard gates give a SOBIB / PIIRIPEAL / EI SOBI
+# 0..1 score; a weighted blend plus hard gates give a FIT / BORDERLINE / NOT FIT
 # verdict. Deterministic (temperature 0) so re-runs are comparable.
 # ---------------------------------------------------------------------------
 
@@ -1413,12 +1413,12 @@ def _suitability_verdict(report: dict) -> tuple:
     # Hard gate: if tool-calling is fundamentally broken, it can't be agentic-fit
     # no matter how clean its prose JSON is.
     if "tool" in report and report["tool"]["valid_rate"] < 0.5:
-        return overall, "❌ EI SOBI — ei suuda usaldusväärselt tööriistu kutsuda"
+        return overall, "❌ NOT FIT — cannot reliably make tool calls"
     if overall >= 0.85:
-        return overall, "✅ SOBIB — täidab agentse kasutuse nõuded"
+        return overall, "✅ FIT — meets the requirements for agentic use"
     if overall >= 0.6:
-        return overall, "⚠ PIIRIPEAL — kasutatav, aga esineb vigu; kontrolli nõrku dimensioone"
-    return overall, "❌ EI SOBI — liiga palju vigu agentseks kasutuseks"
+        return overall, "⚠ BORDERLINE — usable, but it makes mistakes; check the weak dimensions"
+    return overall, "❌ NOT FIT — too many errors for agentic use"
 
 
 # ---------------------------------------------------------------------------
@@ -1434,7 +1434,7 @@ def _suitability_verdict(report: dict) -> tuple:
 #      request shape, measure output tok/s, TTFT p95, TPOT and the 429-vs-hard
 #      error split at each level, then classify the dominant bottleneck (queue/
 #      prefill-bound, decode-bound, no batching, admission control, or breaks).
-# A weighted gate over both phases yields a SOBIB/PIIRIPEAL/EI SOBI verdict for
+# A weighted gate over both phases yields a FIT/BORDERLINE/NOT FIT verdict for
 # OpenRouter and for HuggingFace, whose emphases differ (usage/billing & TTFT vs
 # throughput/batching).
 # ---------------------------------------------------------------------------
@@ -1937,12 +1937,12 @@ def _readiness_analysis(rows: list) -> dict:
 def _rd_verdict(frac: float, critical_ok: bool, gates: dict, crit_msg: str) -> str:
     failed = [k for k, v in gates.items() if not v]
     if not critical_ok:
-        return f"❌ EI SOBI — {crit_msg}"
+        return f"❌ NOT FIT — {crit_msg}"
     if frac >= 0.999:
-        return "✅ SOBIB — täidab kõik nõuded"
+        return "✅ FIT — meets every requirement"
     if frac >= 0.75:
-        return "⚠ PIIRIPEAL — töötab, aga puudu: " + ", ".join(failed[:3])
-    return "❌ EI SOBI — liiga palju puudujääke: " + ", ".join(failed[:3])
+        return "⚠ BORDERLINE — works, but missing: " + ", ".join(failed[:3])
+    return "❌ NOT FIT — too many gaps: " + ", ".join(failed[:3])
 
 
 def _readiness_verdicts(report: dict) -> dict:
