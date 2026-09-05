@@ -28,10 +28,11 @@ Current version: **0.1.0** (no releases tagged yet; entries are by date below).
   are now checked against 1..65535, a backwards range is rejected, and the total is capped at 4096.
   `llmscanner-cli scan` catches the resulting error and exits 2 instead of printing a traceback, and
   `main()` now propagates command exit codes.
-- **The soak workload mix is no longer named after one customer.** `THEEYE_TASKS` → `PRODUCTION_TASKS`
-  with generic task names and shares of calls instead of absolute call counts; `theeye_sample()` →
-  `workload_sample()`; the checkbox now reads "Production workload". The distributions — and so the
-  behaviour — are unchanged, and the docs now point at the table for swapping in your own workload.
+- **The soak workload mix is no longer tied to one customer.** The task table is now
+  `PRODUCTION_TASKS` (`benchmark.py`) with generic task names and each task's *share* of calls rather
+  than absolute call counts, sampled by `workload_sample()`; the checkbox reads "Production workload".
+  The distributions — and so the sampling behaviour — are unchanged, and the docs now point at the
+  table for swapping in your own measurements.
 
 ### 2026-07-07 (new Vision tab — image understanding in a VL model)
 - **New "Vision" tab (after Embed quality)** — checks whether a **vision-language (VL) model really
