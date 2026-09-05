@@ -727,6 +727,15 @@ The same button is in the comparison window too. All results can also be exporte
 - **The scan** runs an asynchronous TCP-connect scan across the subnet on the selected ports and then
   fingerprints the servers behind the open ports it found.
 
+## Related
+
+- **[LLMRouter](https://github.com/raulo987/llmrouter)** — the other side of the same problem: one
+  OpenAI-compatible endpoint in front of many GPU backends, with health-aware routing and admission
+  control. LLM Scanner is what you point at it (or at any single server) to find out what it can
+  actually take. The **Provider fit** tab checks exactly the API contract a router like it expects,
+  and the **Optimum finder**'s "Distinct request prefixes" option exists because of its
+  prefix-affinity routing.
+
 ## Ethical note
 
 Scan only networks you **own or are authorised to test**. Scanning networks that are not

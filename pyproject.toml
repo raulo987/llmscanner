@@ -1,10 +1,30 @@
 [project]
 name = "llmscanner"
 version = "0.1.0"
-description = "Discover and benchmark local LLM servers (vLLM, SGLang, Ollama, llama.cpp, TGI, LM Studio) with a Mac-friendly GUI."
+description = "Discover, benchmark and stress-test local LLM servers (vLLM, SGLang, Ollama, llama.cpp, TGI, LM Studio) from a desktop GUI or the command line."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
+authors = [{ name = "Raul Orav", email = "raul@orav.me" }]
+keywords = [
+    "llm", "benchmark", "vllm", "sglang", "ollama", "llama.cpp", "tgi",
+    "inference", "load-testing", "openai-api", "embeddings", "self-hosted",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: X11 Applications",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Benchmark",
+    "Topic :: Utilities",
+]
 dependencies = [
     "httpx>=0.27",
     "customtkinter>=5.2",
@@ -12,6 +32,12 @@ dependencies = [
 
 [project.optional-dependencies]
 cli = ["rich>=13.0"]
+
+[project.urls]
+Homepage = "https://github.com/raulo987/llmscanner"
+Repository = "https://github.com/raulo987/llmscanner"
+Issues = "https://github.com/raulo987/llmscanner/issues"
+Changelog = "https://github.com/raulo987/llmscanner/blob/main/CHANGELOG.md"
 
 [project.scripts]
 llmscanner = "llmscanner.gui:main"
