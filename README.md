@@ -783,3 +783,15 @@ database file `0600` (owner only) — an existing directory left more permissive
 next run.
 
 The change history is in [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+MIT — see [LICENSE](LICENSE). Use it, change it, ship it. The only condition is that you keep the
+copyright notice and permission notice with the code.
+
+The software is provided **as is, with no warranty of any kind**, and the authors and copyright
+holders accept **no liability** for anything arising from its use — the load, capacity and soak
+tests included, which put real load on whatever server you point them at. The disclaimer in
+[LICENSE](LICENSE) is the operative text.
+
+Copyright © 2026 Visioline Infra OÜ.
